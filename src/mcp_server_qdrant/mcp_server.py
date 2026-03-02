@@ -11,6 +11,7 @@ from mcp_server_qdrant.common.func_tools import make_partial_function
 from mcp_server_qdrant.common.wrap_filters import wrap_filters
 from mcp_server_qdrant.embeddings.base import EmbeddingProvider
 from mcp_server_qdrant.embeddings.factory import create_embedding_provider
+from mcp_server_qdrant.embeddings.types import EmbeddingProviderType
 from mcp_server_qdrant.qdrant import ArbitraryFilter, Entry, Metadata, QdrantConnector
 from mcp_server_qdrant.settings import (
     EmbeddingProviderSettings,
@@ -65,6 +66,12 @@ class QdrantMCPServer(FastMCP):
 
         assert self.embedding_provider is not None, "Embedding provider is required"
 
+        is_cloud = (
+            self.embedding_provider_settings is not None
+            and self.embedding_provider_settings.provider_type
+            == EmbeddingProviderType.CLOUD
+        )
+
         self.qdrant_connector = QdrantConnector(
             qdrant_settings.location,
             qdrant_settings.api_key,
@@ -72,6 +79,12 @@ class QdrantMCPServer(FastMCP):
             self.embedding_provider,
             qdrant_settings.local_path,
             make_indexes(qdrant_settings.filterable_fields_dict()),
+            cloud_inference=is_cloud,
+            sparse_model=(
+                self.embedding_provider_settings.sparse_model
+                if is_cloud and self.embedding_provider_settings
+                else None
+            ),
         )
 
         super().__init__(name=name, instructions=instructions, **settings)

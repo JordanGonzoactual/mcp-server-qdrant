@@ -13,6 +13,8 @@ logger = logging.getLogger(__name__)
 Metadata = dict[str, Any]
 ArbitraryFilter = dict[str, Any]
 
+SPARSE_VECTOR_NAME = "sparse"
+
 
 class Entry(BaseModel):
     """
@@ -32,6 +34,9 @@ class QdrantConnector:
                             the collection name to be provided.
     :param embedding_provider: The embedding provider to use.
     :param qdrant_local_path: The path to the storage directory for the Qdrant client, if local mode is used.
+    :param cloud_inference: Whether to use Qdrant Cloud server-side inference with Document() objects.
+    :param sparse_model: The sparse embedding model for hybrid search (e.g., "qdrant/bm25").
+                         Only used when cloud_inference is True.
     """
 
     def __init__(
@@ -42,14 +47,25 @@ class QdrantConnector:
         embedding_provider: EmbeddingProvider,
         qdrant_local_path: str | None = None,
         field_indexes: dict[str, models.PayloadSchemaType] | None = None,
+        cloud_inference: bool = False,
+        sparse_model: str | None = None,
     ):
         self._qdrant_url = qdrant_url.rstrip("/") if qdrant_url else None
         self._qdrant_api_key = qdrant_api_key
         self._default_collection_name = collection_name
         self._embedding_provider = embedding_provider
-        self._client = AsyncQdrantClient(
-            location=qdrant_url, api_key=qdrant_api_key, path=qdrant_local_path
-        )
+        self._cloud_inference = cloud_inference
+        self._sparse_model = sparse_model
+
+        client_kwargs: dict[str, Any] = {
+            "location": qdrant_url,
+            "api_key": qdrant_api_key,
+            "path": qdrant_local_path,
+        }
+        if cloud_inference:
+            client_kwargs["cloud_inference"] = True
+
+        self._client = AsyncQdrantClient(**client_kwargs)
         self._field_indexes = field_indexes
 
     async def get_collection_names(self) -> list[str]:
@@ -71,24 +87,44 @@ class QdrantConnector:
         assert collection_name is not None
         await self._ensure_collection_exists(collection_name)
 
-        # Embed the document
-        # ToDo: instead of embedding text explicitly, use `models.Document`,
-        # it should unlock usage of server-side inference.
-        embeddings = await self._embedding_provider.embed_documents([entry.content])
-
-        # Add to Qdrant
-        vector_name = self._embedding_provider.get_vector_name()
         payload = {"document": entry.content, METADATA_PATH: entry.metadata}
-        await self._client.upsert(
-            collection_name=collection_name,
-            points=[
-                models.PointStruct(
-                    id=uuid.uuid4().hex,
-                    vector={vector_name: embeddings[0]},
-                    payload=payload,
+
+        if self._cloud_inference:
+            # Use Document objects for server-side embedding
+            dense_model = self._embedding_provider.model_name
+            dense_name = self._embedding_provider.get_vector_name()
+            vector: dict[str, Any] = {
+                dense_name: models.Document(text=entry.content, model=dense_model)
+            }
+            if self._sparse_model:
+                vector[SPARSE_VECTOR_NAME] = models.Document(
+                    text=entry.content, model=self._sparse_model
                 )
-            ],
-        )
+
+            await self._client.upsert(
+                collection_name=collection_name,
+                points=[
+                    models.PointStruct(
+                        id=uuid.uuid4().hex,
+                        vector=vector,
+                        payload=payload,
+                    )
+                ],
+            )
+        else:
+            # Local embedding path (FastEmbed)
+            embeddings = await self._embedding_provider.embed_documents([entry.content])
+            vector_name = self._embedding_provider.get_vector_name()
+            await self._client.upsert(
+                collection_name=collection_name,
+                points=[
+                    models.PointStruct(
+                        id=uuid.uuid4().hex,
+                        vector={vector_name: embeddings[0]},
+                        payload=payload,
+                    )
+                ],
+            )
 
     async def search(
         self,
@@ -113,21 +149,57 @@ class QdrantConnector:
         if not collection_exists:
             return []
 
-        # Embed the query
-        # ToDo: instead of embedding text explicitly, use `models.Document`,
-        # it should unlock usage of server-side inference.
+        if self._cloud_inference and self._sparse_model:
+            # Hybrid search: dense + sparse with Reciprocal Rank Fusion
+            dense_model = self._embedding_provider.model_name
+            dense_name = self._embedding_provider.get_vector_name()
 
-        query_vector = await self._embedding_provider.embed_query(query)
-        vector_name = self._embedding_provider.get_vector_name()
+            search_results = await self._client.query_points(
+                collection_name=collection_name,
+                prefetch=[
+                    models.Prefetch(
+                        query=models.Document(text=query, model=dense_model),
+                        using=dense_name,
+                        limit=limit,
+                    ),
+                    models.Prefetch(
+                        query=models.Document(
+                            text=query, model=self._sparse_model
+                        ),
+                        using=SPARSE_VECTOR_NAME,
+                        limit=limit,
+                    ),
+                ],
+                query=models.FusionQuery(fusion=models.Fusion.RRF),
+                limit=limit,
+                query_filter=query_filter,
+                with_payload=True,
+            )
+        elif self._cloud_inference:
+            # Cloud inference, dense only (no sparse model configured)
+            dense_model = self._embedding_provider.model_name
+            dense_name = self._embedding_provider.get_vector_name()
 
-        # Search in Qdrant
-        search_results = await self._client.query_points(
-            collection_name=collection_name,
-            query=query_vector,
-            using=vector_name,
-            limit=limit,
-            query_filter=query_filter,
-        )
+            search_results = await self._client.query_points(
+                collection_name=collection_name,
+                query=models.Document(text=query, model=dense_model),
+                using=dense_name,
+                limit=limit,
+                query_filter=query_filter,
+                with_payload=True,
+            )
+        else:
+            # Local embedding path (FastEmbed)
+            query_vector = await self._embedding_provider.embed_query(query)
+            vector_name = self._embedding_provider.get_vector_name()
+
+            search_results = await self._client.query_points(
+                collection_name=collection_name,
+                query=query_vector,
+                using=vector_name,
+                limit=limit,
+                query_filter=query_filter,
+            )
 
         return [
             Entry(
@@ -149,6 +221,15 @@ class QdrantConnector:
 
             # Use the vector name as defined in the embedding provider
             vector_name = self._embedding_provider.get_vector_name()
+
+            sparse_config = None
+            if self._sparse_model:
+                sparse_config = {
+                    SPARSE_VECTOR_NAME: models.SparseVectorParams(
+                        modifier=models.Modifier.IDF
+                    )
+                }
+
             await self._client.create_collection(
                 collection_name=collection_name,
                 vectors_config={
@@ -157,6 +238,7 @@ class QdrantConnector:
                         distance=models.Distance.COSINE,
                     )
                 },
+                sparse_vectors_config=sparse_config,
             )
 
             # Create payload indexes if configured

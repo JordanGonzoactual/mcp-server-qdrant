@@ -46,6 +46,12 @@ class EmbeddingProviderSettings(BaseSettings):
         default="sentence-transformers/all-MiniLM-L6-v2",
         validation_alias="EMBEDDING_MODEL",
     )
+    sparse_model: str | None = Field(
+        default=None,
+        validation_alias="SPARSE_MODEL",
+        description="Sparse embedding model for hybrid search (e.g., 'qdrant/bm25'). "
+        "Only used with EMBEDDING_PROVIDER=cloud.",
+    )
 
 
 class FilterableField(BaseModel):
