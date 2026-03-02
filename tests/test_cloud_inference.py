@@ -17,7 +17,7 @@ class TestCloudInferenceProvider:
         assert provider.get_vector_size() == 384
 
     def test_initialization_large_model(self):
-        provider = CloudInferenceProvider("mxbai/embed-large-v1")
+        provider = CloudInferenceProvider("mixedbread-ai/mxbai-embed-large-v1")
         assert provider.get_vector_size() == 1024
 
     def test_initialization_unknown_model(self):
@@ -25,18 +25,18 @@ class TestCloudInferenceProvider:
             CloudInferenceProvider("unknown/model")
 
     def test_get_vector_name(self):
-        provider = CloudInferenceProvider("mxbai/embed-large-v1")
+        provider = CloudInferenceProvider("mixedbread-ai/mxbai-embed-large-v1")
         assert provider.get_vector_name() == "dense"
 
     @pytest.mark.asyncio
     async def test_embed_documents_raises(self):
-        provider = CloudInferenceProvider("mxbai/embed-large-v1")
+        provider = CloudInferenceProvider("mixedbread-ai/mxbai-embed-large-v1")
         with pytest.raises(NotImplementedError):
             await provider.embed_documents(["test"])
 
     @pytest.mark.asyncio
     async def test_embed_query_raises(self):
-        provider = CloudInferenceProvider("mxbai/embed-large-v1")
+        provider = CloudInferenceProvider("mixedbread-ai/mxbai-embed-large-v1")
         with pytest.raises(NotImplementedError):
             await provider.embed_query("test")
 
@@ -49,7 +49,7 @@ class TestCloudInferenceProvider:
 class TestCloudInferenceFactory:
     def test_create_cloud_provider(self, monkeypatch):
         monkeypatch.setenv("EMBEDDING_PROVIDER", "cloud")
-        monkeypatch.setenv("EMBEDDING_MODEL", "mxbai/embed-large-v1")
+        monkeypatch.setenv("EMBEDDING_MODEL", "mixedbread-ai/mxbai-embed-large-v1")
         settings = EmbeddingProviderSettings()
         provider = create_embedding_provider(settings)
         assert isinstance(provider, CloudInferenceProvider)
@@ -59,10 +59,10 @@ class TestCloudInferenceFactory:
 class TestCloudInferenceSettings:
     def test_cloud_provider_from_env(self, monkeypatch):
         monkeypatch.setenv("EMBEDDING_PROVIDER", "cloud")
-        monkeypatch.setenv("EMBEDDING_MODEL", "mxbai/embed-large-v1")
+        monkeypatch.setenv("EMBEDDING_MODEL", "mixedbread-ai/mxbai-embed-large-v1")
         settings = EmbeddingProviderSettings()
         assert settings.provider_type == EmbeddingProviderType.CLOUD
-        assert settings.model_name == "mxbai/embed-large-v1"
+        assert settings.model_name == "mixedbread-ai/mxbai-embed-large-v1"
 
     def test_sparse_model_default(self):
         settings = EmbeddingProviderSettings()
@@ -79,7 +79,7 @@ class TestQdrantConnectorCloudInference:
 
     @pytest.fixture
     def cloud_provider(self):
-        return CloudInferenceProvider("mxbai/embed-large-v1")
+        return CloudInferenceProvider("mixedbread-ai/mxbai-embed-large-v1")
 
     @pytest.fixture
     def mock_client(self):
@@ -163,7 +163,7 @@ class TestQdrantConnectorCloudInference:
         # Should use Document object for dense vector
         assert isinstance(point.vector["dense"], models.Document)
         assert point.vector["dense"].text == "test content"
-        assert point.vector["dense"].model == "mxbai/embed-large-v1"
+        assert point.vector["dense"].model == "mixedbread-ai/mxbai-embed-large-v1"
 
         # No sparse vector
         assert SPARSE_VECTOR_NAME not in point.vector
@@ -183,7 +183,7 @@ class TestQdrantConnectorCloudInference:
 
         # Dense vector
         assert isinstance(point.vector["dense"], models.Document)
-        assert point.vector["dense"].model == "mxbai/embed-large-v1"
+        assert point.vector["dense"].model == "mixedbread-ai/mxbai-embed-large-v1"
 
         # Sparse vector
         assert isinstance(point.vector[SPARSE_VECTOR_NAME], models.Document)

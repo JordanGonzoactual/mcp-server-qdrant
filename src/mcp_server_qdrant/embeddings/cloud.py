@@ -4,7 +4,7 @@ from mcp_server_qdrant.embeddings.base import EmbeddingProvider
 # Full list available in Qdrant Cloud Console > Cluster Detail > Inference tab.
 CLOUD_MODEL_DIMENSIONS: dict[str, int] = {
     "sentence-transformers/all-minilm-l6-v2": 384,
-    "mxbai/embed-large-v1": 1024,
+    "mixedbread-ai/mxbai-embed-large-v1": 1024,
     "qdrant/clip-vit-b-32-vision": 512,
     "qdrant/clip-vit-b-32-text": 512,
 }
