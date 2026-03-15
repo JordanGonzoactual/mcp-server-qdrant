@@ -177,12 +177,18 @@ class QdrantMCPServer(FastMCP):
                 content.append(self.format_entry(entry))
             return content
 
-        find_foo = find
-        store_foo = store
-
         filterable_conditions = (
             self.qdrant_settings.filterable_fields_dict_with_conditions()
         )
+
+        if self.qdrant_settings.qdrant_collections:
+            self._register_multi_collection_tools(
+                find, store, filterable_conditions
+            )
+            return
+
+        find_foo = find
+        store_foo = store
 
         if len(filterable_conditions) > 0:
             find_foo = wrap_filters(find_foo, filterable_conditions)
@@ -210,3 +216,26 @@ class QdrantMCPServer(FastMCP):
                 name="qdrant-store",
                 description=self.tool_settings.tool_store_description,
             )
+
+    def _register_multi_collection_tools(self, find, store, filterable_conditions):
+        """Register labeled find/store tools for each entry in qdrant_collections."""
+        for label, collection in self.qdrant_settings.qdrant_collections.items():
+            find_foo = make_partial_function(find, {"collection_name": collection})
+            if len(filterable_conditions) > 0:
+                find_foo = wrap_filters(find_foo, filterable_conditions)
+            elif not self.qdrant_settings.allow_arbitrary_filter:
+                find_foo = make_partial_function(find_foo, {"query_filter": None})
+
+            self.tool(
+                find_foo,
+                name=f"qdrant-find-{label}",
+                description=self.tool_settings.get_find_description(label),
+            )
+
+            if not self.qdrant_settings.read_only:
+                store_foo = make_partial_function(store, {"collection_name": collection})
+                self.tool(
+                    store_foo,
+                    name=f"qdrant-store-{label}",
+                    description=self.tool_settings.get_store_description(label),
+                )
