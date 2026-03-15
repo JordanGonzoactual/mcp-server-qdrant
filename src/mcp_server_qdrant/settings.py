@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 from mcp_server_qdrant.embeddings.types import EmbeddingProviderType
@@ -97,6 +97,31 @@ class QdrantSettings(BaseSettings):
         default=False, validation_alias="QDRANT_ALLOW_ARBITRARY_FILTER"
     )
 
+    qdrant_collections: dict[str, str] | None = Field(
+        default=None, validation_alias="QDRANT_COLLECTIONS"
+    )
+
+    @field_validator("qdrant_collections", mode="before")
+    @classmethod
+    def parse_qdrant_collections(cls, value: object) -> dict[str, str] | None:
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            return value
+        if not isinstance(value, str):
+            raise ValueError("QDRANT_COLLECTIONS must be a string of name:collection pairs")
+        result: dict[str, str] = {}
+        for entry in value.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            parts = entry.split(":", 1)
+            if len(parts) != 2:
+                raise ValueError(f"Invalid entry in QDRANT_COLLECTIONS: {entry!r}. Expected 'name:collection'.")
+            name, collection = parts[0].strip(), parts[1].strip()
+            result[name] = collection
+        return result or None
+
     def filterable_fields_dict(self) -> dict[str, FilterableField]:
         if self.filterable_fields is None:
             return {}
@@ -110,6 +135,12 @@ class QdrantSettings(BaseSettings):
             for field in self.filterable_fields
             if field.condition is not None
         }
+
+    @model_validator(mode="after")
+    def check_collections_conflict(self) -> "QdrantSettings":
+        if self.qdrant_collections is not None and self.collection_name is not None:
+            raise ValueError("Cannot set both")
+        return self
 
     @model_validator(mode="after")
     def check_local_path_conflict(self) -> "QdrantSettings":

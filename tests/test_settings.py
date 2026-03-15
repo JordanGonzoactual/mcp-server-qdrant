@@ -79,6 +79,92 @@ class TestEmbeddingProviderSettings:
         assert settings.model_name == "custom_model"
 
 
+class TestQdrantCollectionsSetting:
+    def test_qdrant_collections_none_when_unset(self, monkeypatch):
+        """When QDRANT_COLLECTIONS is not set, field should be None."""
+        monkeypatch.delenv("QDRANT_COLLECTIONS", raising=False)
+        monkeypatch.delenv("COLLECTION_NAME", raising=False)
+        monkeypatch.delenv("QDRANT_URL", raising=False)
+        monkeypatch.delenv("QDRANT_API_KEY", raising=False)
+
+        settings = QdrantSettings()
+        assert settings.qdrant_collections is None
+
+    def test_qdrant_collections_single_entry(self, monkeypatch):
+        """Parse a single name:collection pair."""
+        monkeypatch.setenv("QDRANT_COLLECTIONS", "research:KnowledgeMap")
+        monkeypatch.delenv("COLLECTION_NAME", raising=False)
+        monkeypatch.delenv("QDRANT_URL", raising=False)
+        monkeypatch.delenv("QDRANT_API_KEY", raising=False)
+
+        settings = QdrantSettings()
+        assert settings.qdrant_collections == {"research": "KnowledgeMap"}
+
+    def test_qdrant_collections_multiple_entries(self, monkeypatch):
+        """Parse multiple comma-separated name:collection pairs."""
+        monkeypatch.setenv(
+            "QDRANT_COLLECTIONS",
+            "research:KnowledgeMap,memory:mem-claude-code-system",
+        )
+        monkeypatch.delenv("COLLECTION_NAME", raising=False)
+        monkeypatch.delenv("QDRANT_URL", raising=False)
+        monkeypatch.delenv("QDRANT_API_KEY", raising=False)
+
+        settings = QdrantSettings()
+        assert settings.qdrant_collections == {
+            "research": "KnowledgeMap",
+            "memory": "mem-claude-code-system",
+        }
+
+    def test_qdrant_collections_strips_whitespace(self, monkeypatch):
+        """Whitespace around names and colons should be stripped."""
+        monkeypatch.setenv(
+            "QDRANT_COLLECTIONS",
+            " research : KnowledgeMap , memory : mem-claude-code-system ",
+        )
+        monkeypatch.delenv("COLLECTION_NAME", raising=False)
+        monkeypatch.delenv("QDRANT_URL", raising=False)
+        monkeypatch.delenv("QDRANT_API_KEY", raising=False)
+
+        settings = QdrantSettings()
+        assert settings.qdrant_collections == {
+            "research": "KnowledgeMap",
+            "memory": "mem-claude-code-system",
+        }
+
+    def test_qdrant_collections_conflict_with_collection_name(self, monkeypatch):
+        """Setting both QDRANT_COLLECTIONS and COLLECTION_NAME should raise ValueError."""
+        monkeypatch.setenv("QDRANT_COLLECTIONS", "research:KnowledgeMap")
+        monkeypatch.setenv("COLLECTION_NAME", "some_collection")
+        monkeypatch.delenv("QDRANT_URL", raising=False)
+        monkeypatch.delenv("QDRANT_API_KEY", raising=False)
+
+        with pytest.raises(ValueError, match="Cannot set both"):
+            QdrantSettings()
+
+    def test_legacy_collection_name_still_works(self, monkeypatch):
+        """COLLECTION_NAME env var must still work when QDRANT_COLLECTIONS is not set."""
+        monkeypatch.setenv("COLLECTION_NAME", "legacy_collection")
+        monkeypatch.delenv("QDRANT_COLLECTIONS", raising=False)
+        monkeypatch.delenv("QDRANT_URL", raising=False)
+        monkeypatch.delenv("QDRANT_API_KEY", raising=False)
+
+        settings = QdrantSettings()
+        assert settings.collection_name == "legacy_collection"
+        assert settings.qdrant_collections is None
+
+    def test_both_none_when_neither_set(self, monkeypatch):
+        """When neither env var is set, both fields should be None."""
+        monkeypatch.delenv("COLLECTION_NAME", raising=False)
+        monkeypatch.delenv("QDRANT_COLLECTIONS", raising=False)
+        monkeypatch.delenv("QDRANT_URL", raising=False)
+        monkeypatch.delenv("QDRANT_API_KEY", raising=False)
+
+        settings = QdrantSettings()
+        assert settings.collection_name is None
+        assert settings.qdrant_collections is None
+
+
 class TestToolSettings:
     def test_default_values(self):
         """Test that default values are set correctly when no env vars are provided."""
