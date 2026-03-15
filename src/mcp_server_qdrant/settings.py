@@ -1,3 +1,4 @@
+import os
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -31,6 +32,14 @@ class ToolSettings(BaseSettings):
         default=DEFAULT_TOOL_FIND_DESCRIPTION,
         validation_alias="TOOL_FIND_DESCRIPTION",
     )
+
+    def get_find_description(self, collection_label: str) -> str:
+        env_key = f"TOOL_FIND_DESCRIPTION_{collection_label.upper()}"
+        return os.environ.get(env_key, self.tool_find_description)
+
+    def get_store_description(self, collection_label: str) -> str:
+        env_key = f"TOOL_STORE_DESCRIPTION_{collection_label.upper()}"
+        return os.environ.get(env_key, self.tool_store_description)
 
 
 class EmbeddingProviderSettings(BaseSettings):

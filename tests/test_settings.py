@@ -193,3 +193,41 @@ class TestToolSettings:
         settings = ToolSettings()
         assert settings.tool_store_description == "Custom store description"
         assert settings.tool_find_description == "Custom find description"
+
+    def test_get_find_description_returns_default_when_no_override(self, monkeypatch):
+        """get_find_description falls back to tool_find_description when no override env var is set."""
+        monkeypatch.delenv("TOOL_FIND_DESCRIPTION_MEMORY", raising=False)
+        settings = ToolSettings()
+        assert settings.get_find_description("memory") == DEFAULT_TOOL_FIND_DESCRIPTION
+
+    def test_get_find_description_returns_override_when_env_var_set(self, monkeypatch):
+        """get_find_description returns override value when TOOL_FIND_DESCRIPTION_MEMORY is set."""
+        monkeypatch.setenv("TOOL_FIND_DESCRIPTION_MEMORY", "Find memories in the memory collection")
+        settings = ToolSettings()
+        assert settings.get_find_description("memory") == "Find memories in the memory collection"
+
+    def test_get_find_description_label_uppercased_for_env_lookup(self, monkeypatch):
+        """get_find_description uses uppercase label when looking up the env var."""
+        monkeypatch.setenv("TOOL_FIND_DESCRIPTION_RESEARCH", "Search the research collection")
+        settings = ToolSettings()
+        assert settings.get_find_description("research") == "Search the research collection"
+
+    def test_get_store_description_returns_default_when_no_override(self, monkeypatch):
+        """get_store_description falls back to tool_store_description when no override env var is set."""
+        monkeypatch.delenv("TOOL_STORE_DESCRIPTION_MEMORY", raising=False)
+        settings = ToolSettings()
+        assert settings.get_store_description("memory") == DEFAULT_TOOL_STORE_DESCRIPTION
+
+    def test_get_store_description_returns_override_when_env_var_set(self, monkeypatch):
+        """get_store_description returns override when TOOL_STORE_DESCRIPTION_RESEARCH is set."""
+        monkeypatch.setenv("TOOL_STORE_DESCRIPTION_RESEARCH", "Store documents in the research collection")
+        settings = ToolSettings()
+        assert settings.get_store_description("research") == "Store documents in the research collection"
+
+    def test_get_find_description_does_not_affect_other_labels(self, monkeypatch):
+        """Override for one label does not affect another label's find description."""
+        monkeypatch.setenv("TOOL_FIND_DESCRIPTION_MEMORY", "Custom memory find")
+        monkeypatch.delenv("TOOL_FIND_DESCRIPTION_RESEARCH", raising=False)
+        settings = ToolSettings()
+        assert settings.get_find_description("memory") == "Custom memory find"
+        assert settings.get_find_description("research") == DEFAULT_TOOL_FIND_DESCRIPTION
