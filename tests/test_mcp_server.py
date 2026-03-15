@@ -39,7 +39,7 @@ def get_tool_names(server: QdrantMCPServer) -> list[str]:
 
 class TestSetupToolsLegacySingleCollection:
     def test_legacy_single_collection_registers_find_and_store(self, monkeypatch):
-        """When COLLECTION_NAME is set, registers qdrant-find and qdrant-store (2 tools)."""
+        """When COLLECTION_NAME is set, registers qdrant-find and qdrant-store (3 tools)."""
         clean_env(monkeypatch)
         monkeypatch.setenv("COLLECTION_NAME", "KnowledgeMap")
 
@@ -52,7 +52,21 @@ class TestSetupToolsLegacySingleCollection:
         tool_names = get_tool_names(server)
         assert "qdrant-find" in tool_names
         assert "qdrant-store" in tool_names
-        assert len(tool_names) == 2
+        assert len(tool_names) == 3
+
+    def test_legacy_registers_update_tool(self, monkeypatch):
+        """COLLECTION_NAME -> qdrant-update registered."""
+        clean_env(monkeypatch)
+        monkeypatch.setenv("COLLECTION_NAME", "KnowledgeMap")
+
+        server = QdrantMCPServer(
+            tool_settings=ToolSettings(),
+            qdrant_settings=QdrantSettings(),
+            embedding_provider=make_mock_embedding_provider(),
+        )
+
+        tool_names = get_tool_names(server)
+        assert "qdrant-update" in tool_names
 
 
 class TestSetupToolsMultiCollection:
@@ -74,7 +88,7 @@ class TestSetupToolsMultiCollection:
         assert "qdrant-store-research" in tool_names
         assert "qdrant-find-memory" in tool_names
         assert "qdrant-store-memory" in tool_names
-        assert len(tool_names) == 4
+        assert len(tool_names) == 6
 
     def test_multi_collection_does_not_register_generic_tools(self, monkeypatch):
         """When QDRANT_COLLECTIONS is set, generic qdrant-find and qdrant-store are NOT registered."""
@@ -90,6 +104,55 @@ class TestSetupToolsMultiCollection:
         tool_names = get_tool_names(server)
         assert "qdrant-find" not in tool_names
         assert "qdrant-store" not in tool_names
+
+
+class TestUpdateMetadataTool:
+    def test_multi_collection_registers_update_tools(self, monkeypatch):
+        """QDRANT_COLLECTIONS -> qdrant-update-{name} tools registered."""
+        clean_env(monkeypatch)
+        monkeypatch.setenv(
+            "QDRANT_COLLECTIONS",
+            "research:KnowledgeMap,memory:mem-claude-code-system",
+        )
+
+        server = QdrantMCPServer(
+            tool_settings=ToolSettings(),
+            qdrant_settings=QdrantSettings(),
+            embedding_provider=make_mock_embedding_provider(),
+        )
+
+        tool_names = get_tool_names(server)
+        assert "qdrant-update-research" in tool_names
+        assert "qdrant-update-memory" in tool_names
+
+    def test_legacy_registers_update_tool(self, monkeypatch):
+        """COLLECTION_NAME -> qdrant-update registered."""
+        clean_env(monkeypatch)
+        monkeypatch.setenv("COLLECTION_NAME", "KnowledgeMap")
+
+        server = QdrantMCPServer(
+            tool_settings=ToolSettings(),
+            qdrant_settings=QdrantSettings(),
+            embedding_provider=make_mock_embedding_provider(),
+        )
+
+        tool_names = get_tool_names(server)
+        assert "qdrant-update" in tool_names
+
+    def test_read_only_skips_update_tool(self, monkeypatch):
+        """read_only -> no update tools."""
+        clean_env(monkeypatch)
+        monkeypatch.setenv("QDRANT_COLLECTIONS", "research:KnowledgeMap")
+        monkeypatch.setenv("QDRANT_READ_ONLY", "true")
+
+        server = QdrantMCPServer(
+            tool_settings=ToolSettings(),
+            qdrant_settings=QdrantSettings(),
+            embedding_provider=make_mock_embedding_provider(),
+        )
+
+        tool_names = get_tool_names(server)
+        assert "qdrant-update-research" not in tool_names
 
 
 class TestSetupToolsMultiCollectionReadOnly:
@@ -108,6 +171,7 @@ class TestSetupToolsMultiCollectionReadOnly:
         tool_names = get_tool_names(server)
         assert "qdrant-find-research" in tool_names
         assert "qdrant-store-research" not in tool_names
+        assert "qdrant-update-research" not in tool_names
         assert len(tool_names) == 1
 
 
@@ -125,4 +189,4 @@ class TestSetupToolsNoConfig:
         tool_names = get_tool_names(server)
         assert "qdrant-find" in tool_names
         assert "qdrant-store" in tool_names
-        assert len(tool_names) == 2
+        assert len(tool_names) == 3

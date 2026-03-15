@@ -209,6 +209,30 @@ class QdrantConnector:
             for result in search_results.points
         ]
 
+    async def update_payload(
+        self,
+        point_ids: list[str],
+        payload: dict[str, Any],
+        *,
+        collection_name: str | None = None,
+    ) -> int:
+        """
+        Update payload fields on existing points.
+        :param point_ids: List of point IDs to update.
+        :param payload: Payload fields to set/overwrite (merged with existing payload).
+        :param collection_name: The collection containing the points.
+        :return: Number of points updated.
+        """
+        collection_name = collection_name or self._default_collection_name
+        assert collection_name is not None
+
+        await self._client.set_payload(
+            collection_name=collection_name,
+            payload=payload,
+            points=point_ids,
+        )
+        return len(point_ids)
+
     async def _ensure_collection_exists(self, collection_name: str):
         """
         Ensure that the collection exists, creating it if necessary.

@@ -177,18 +177,44 @@ class QdrantMCPServer(FastMCP):
                 content.append(self.format_entry(entry))
             return content
 
+        async def update_metadata(
+            ctx: Context,
+            point_ids: Annotated[
+                list[str], Field(description="List of point IDs to update")
+            ],
+            metadata: Annotated[
+                Metadata,
+                Field(
+                    description="Metadata fields to set or overwrite on the points. Merged with existing metadata."
+                ),
+            ],
+            collection_name: Annotated[
+                str, Field(description="The collection containing the points")
+            ],
+        ) -> str:
+            """
+            Update metadata on existing points without re-embedding.
+            """
+            await ctx.debug(f"Updating metadata on {len(point_ids)} points")
+            payload_update = {f"metadata.{k}": v for k, v in metadata.items()}
+            count = await self.qdrant_connector.update_payload(
+                point_ids, payload_update, collection_name=collection_name
+            )
+            return f"Updated metadata on {count} point(s)"
+
         filterable_conditions = (
             self.qdrant_settings.filterable_fields_dict_with_conditions()
         )
 
         if self.qdrant_settings.qdrant_collections:
             self._register_multi_collection_tools(
-                find, store, filterable_conditions
+                find, store, update_metadata, filterable_conditions
             )
             return
 
         find_foo = find
         store_foo = store
+        update_foo = update_metadata
 
         if len(filterable_conditions) > 0:
             find_foo = wrap_filters(find_foo, filterable_conditions)
@@ -201,6 +227,10 @@ class QdrantMCPServer(FastMCP):
             )
             store_foo = make_partial_function(
                 store_foo, {"collection_name": self.qdrant_settings.collection_name}
+            )
+            update_foo = make_partial_function(
+                update_foo,
+                {"collection_name": self.qdrant_settings.collection_name},
             )
 
         self.tool(
@@ -216,9 +246,16 @@ class QdrantMCPServer(FastMCP):
                 name="qdrant-store",
                 description=self.tool_settings.tool_store_description,
             )
+            self.tool(
+                update_foo,
+                name="qdrant-update",
+                description="Update metadata on existing points in Qdrant.",
+            )
 
-    def _register_multi_collection_tools(self, find, store, filterable_conditions):
-        """Register labeled find/store tools for each entry in qdrant_collections."""
+    def _register_multi_collection_tools(
+        self, find, store, update_metadata, filterable_conditions
+    ):
+        """Register labeled find/store/update tools for each entry in qdrant_collections."""
         for label, collection in self.qdrant_settings.qdrant_collections.items():
             find_foo = make_partial_function(find, {"collection_name": collection})
             if len(filterable_conditions) > 0:
@@ -238,4 +275,13 @@ class QdrantMCPServer(FastMCP):
                     store_foo,
                     name=f"qdrant-store-{label}",
                     description=self.tool_settings.get_store_description(label),
+                )
+
+                update_foo = make_partial_function(
+                    update_metadata, {"collection_name": collection}
+                )
+                self.tool(
+                    update_foo,
+                    name=f"qdrant-update-{label}",
+                    description=f"Update metadata on existing points in the {label} collection.",
                 )
