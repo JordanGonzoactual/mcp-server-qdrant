@@ -5,8 +5,6 @@ import pytest
 from mcp_server_qdrant.mcp_server import QdrantMCPServer
 from mcp_server_qdrant.settings import QdrantSettings, ToolSettings
 
-
-
 ENV_VARS_TO_CLEAN = [
     "QDRANT_URL",
     "QDRANT_API_KEY",
@@ -37,19 +35,21 @@ def make_mock_embedding_provider():
     return provider
 
 
-def clean_env(monkeypatch):
-    for var in ENV_VARS_TO_CLEAN:
-        monkeypatch.delenv(var, raising=False)
-
-
 def get_tool_names(server: QdrantMCPServer) -> list[str]:
     return [t.name for t in server._tool_manager._tools.values()]
 
 
+def create_server() -> QdrantMCPServer:
+    return QdrantMCPServer(
+        tool_settings=ToolSettings(),
+        qdrant_settings=QdrantSettings(),
+        embedding_provider=make_mock_embedding_provider(),
+    )
+
+
 class TestSetupToolsLegacySingleCollection:
-    def test_legacy_single_collection_registers_find_and_store(self, monkeypatch):
+    def test_legacy_single_collection_registers_find_and_store(self, clean_env, monkeypatch):
         """When COLLECTION_NAME is set, registers qdrant-find and qdrant-store (3 tools)."""
-        clean_env(monkeypatch)
         monkeypatch.setenv("COLLECTION_NAME", "KnowledgeMap")
 
         server = QdrantMCPServer(
@@ -63,9 +63,8 @@ class TestSetupToolsLegacySingleCollection:
         assert "qdrant-store" in tool_names
         assert len(tool_names) == 3
 
-    def test_legacy_registers_update_tool(self, monkeypatch):
+    def test_legacy_registers_update_tool(self, clean_env, monkeypatch):
         """COLLECTION_NAME -> qdrant-update registered."""
-        clean_env(monkeypatch)
         monkeypatch.setenv("COLLECTION_NAME", "KnowledgeMap")
 
         server = QdrantMCPServer(
@@ -79,9 +78,8 @@ class TestSetupToolsLegacySingleCollection:
 
 
 class TestSetupToolsMultiCollection:
-    def test_multi_collection_registers_labeled_tools(self, monkeypatch):
+    def test_multi_collection_registers_labeled_tools(self, clean_env, monkeypatch):
         """When QDRANT_COLLECTIONS is set, registers qdrant-find-{label} and qdrant-store-{label} per entry."""
-        clean_env(monkeypatch)
         monkeypatch.setenv(
             "QDRANT_COLLECTIONS", "research:KnowledgeMap,memory:mem-claude-code-system"
         )
@@ -99,9 +97,8 @@ class TestSetupToolsMultiCollection:
         assert "qdrant-store-memory" in tool_names
         assert len(tool_names) == 6
 
-    def test_multi_collection_does_not_register_generic_tools(self, monkeypatch):
+    def test_multi_collection_does_not_register_generic_tools(self, clean_env, monkeypatch):
         """When QDRANT_COLLECTIONS is set, generic qdrant-find and qdrant-store are NOT registered."""
-        clean_env(monkeypatch)
         monkeypatch.setenv("QDRANT_COLLECTIONS", "research:KnowledgeMap")
 
         server = QdrantMCPServer(
@@ -116,9 +113,8 @@ class TestSetupToolsMultiCollection:
 
 
 class TestUpdateMetadataTool:
-    def test_multi_collection_registers_update_tools(self, monkeypatch):
+    def test_multi_collection_registers_update_tools(self, clean_env, monkeypatch):
         """QDRANT_COLLECTIONS -> qdrant-update-{name} tools registered."""
-        clean_env(monkeypatch)
         monkeypatch.setenv(
             "QDRANT_COLLECTIONS",
             "research:KnowledgeMap,memory:mem-claude-code-system",
@@ -134,9 +130,8 @@ class TestUpdateMetadataTool:
         assert "qdrant-update-research" in tool_names
         assert "qdrant-update-memory" in tool_names
 
-    def test_legacy_registers_update_tool(self, monkeypatch):
+    def test_legacy_registers_update_tool(self, clean_env, monkeypatch):
         """COLLECTION_NAME -> qdrant-update registered."""
-        clean_env(monkeypatch)
         monkeypatch.setenv("COLLECTION_NAME", "KnowledgeMap")
 
         server = QdrantMCPServer(
@@ -148,9 +143,8 @@ class TestUpdateMetadataTool:
         tool_names = get_tool_names(server)
         assert "qdrant-update" in tool_names
 
-    def test_read_only_skips_update_tool(self, monkeypatch):
+    def test_read_only_skips_update_tool(self, clean_env, monkeypatch):
         """read_only -> no update tools."""
-        clean_env(monkeypatch)
         monkeypatch.setenv("QDRANT_COLLECTIONS", "research:KnowledgeMap")
         monkeypatch.setenv("QDRANT_READ_ONLY", "true")
 
@@ -165,9 +159,8 @@ class TestUpdateMetadataTool:
 
 
 class TestSetupToolsMultiCollectionReadOnly:
-    def test_multi_collection_read_only_skips_store_tools(self, monkeypatch):
+    def test_multi_collection_read_only_skips_store_tools(self, clean_env, monkeypatch):
         """When QDRANT_COLLECTIONS + QDRANT_READ_ONLY=true, only qdrant-find-{label} tools are registered."""
-        clean_env(monkeypatch)
         monkeypatch.setenv("QDRANT_COLLECTIONS", "research:KnowledgeMap")
         monkeypatch.setenv("QDRANT_READ_ONLY", "true")
 
@@ -185,10 +178,8 @@ class TestSetupToolsMultiCollectionReadOnly:
 
 
 class TestSetupToolsNoConfig:
-    def test_no_config_registers_generic_find_and_store(self, monkeypatch):
+    def test_no_config_registers_generic_find_and_store(self, clean_env):
         """When neither COLLECTION_NAME nor QDRANT_COLLECTIONS is set, registers generic qdrant-find and qdrant-store."""
-        clean_env(monkeypatch)
-
         server = QdrantMCPServer(
             tool_settings=ToolSettings(),
             qdrant_settings=QdrantSettings(),
@@ -199,14 +190,6 @@ class TestSetupToolsNoConfig:
         assert "qdrant-find" in tool_names
         assert "qdrant-store" in tool_names
         assert len(tool_names) == 3
-
-
-def create_server() -> QdrantMCPServer:
-    return QdrantMCPServer(
-        tool_settings=ToolSettings(),
-        qdrant_settings=QdrantSettings(),
-        embedding_provider=make_mock_embedding_provider(),
-    )
 
 
 class TestChannelCapability:

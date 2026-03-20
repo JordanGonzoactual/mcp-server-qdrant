@@ -3,6 +3,8 @@ import logging
 from typing import Annotated, Any, Optional
 
 from fastmcp import Context, FastMCP
+from mcp.server.lowlevel.server import NotificationOptions
+from mcp.server.stdio import stdio_server
 from pydantic import Field
 from qdrant_client import models
 
@@ -41,6 +43,7 @@ class QdrantMCPServer(FastMCP):
     ):
         self.tool_settings = tool_settings
         self.qdrant_settings = qdrant_settings
+        self._qdrant_settings = qdrant_settings
 
         if embedding_provider_settings and embedding_provider:
             raise ValueError(
@@ -285,3 +288,18 @@ class QdrantMCPServer(FastMCP):
                     name=f"qdrant-update-{label}",
                     description=f"Update metadata on existing points in the {label} collection.",
                 )
+
+    async def run_stdio_async(self) -> None:
+        """Run the server using stdio transport, injecting channel capability when enabled."""
+        experimental: dict[str, dict[str, Any]] | None = None
+        if self._qdrant_settings.channel_enabled:
+            experimental = {"claude/channel": {}}
+
+        init_options = self._mcp_server.create_initialization_options(
+            NotificationOptions(tools_changed=True),
+            experimental_capabilities=experimental,
+        )
+
+        async with stdio_server() as (read_stream, write_stream):
+            logger.info(f"Starting MCP server {self.name!r} with transport 'stdio'")
+            await self._mcp_server.run(read_stream, write_stream, init_options)
