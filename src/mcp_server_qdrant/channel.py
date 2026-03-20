@@ -4,7 +4,9 @@ import json
 import os
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from mcp.types import JSONRPCNotification
 from mcp.shared.message import SessionMessage
@@ -127,3 +129,114 @@ class JournalWatcher:
             if 'description' in entry:
                 parts.append(entry['description'])
         return ' '.join(parts)
+
+
+STALE_MEMORY_DAYS = 30
+
+
+class ChannelOrchestrator:
+    """Coordinates journal watching, similarity search, rate limiting, and notification sending."""
+
+    def __init__(
+        self,
+        connector: Any,
+        collections: dict[str, str],
+        session: Any,
+        journal_path: str = "",
+        similarity_threshold: float = 0.80,
+        cooldown_seconds: int = 60,
+        max_per_session: int = 20,
+    ) -> None:
+        self._connector = connector
+        self._collections = collections
+        self._session = session
+        self._similarity_threshold = similarity_threshold
+        self._state = ChannelSessionState(
+            cooldown_seconds=cooldown_seconds,
+            max_per_session=max_per_session,
+        )
+        self._notifier = ChannelNotifier()
+        self._journal_watcher = JournalWatcher(journal_path)
+
+    async def check_journal(self) -> None:
+        """Read new journal entries, search for relevant memory, and push if a match is found."""
+        entries = self._journal_watcher.read_new_entries()
+        if not entries:
+            return
+
+        search_text = self._journal_watcher.extract_search_text(entries)
+        if not search_text.strip():
+            return
+
+        best_entry = await self._find_best_match(search_text)
+        if best_entry is None:
+            return
+
+        if not self._state.can_push():
+            return
+
+        point_id = self._extract_point_id(best_entry)
+        if point_id and self._state.is_already_pushed(point_id):
+            return
+
+        meta = {"type": "memory_match", "point_id": point_id or ""}
+        await self._notifier.send(self._session, best_entry.content, meta)
+        if point_id:
+            self._state.record_push(point_id)
+
+    async def _find_best_match(self, search_text: str):
+        """Search all collections and return the first unpushed result, or None."""
+        for _label, collection_name in self._collections.items():
+            results = await self._connector.search(
+                search_text,
+                collection_name=collection_name,
+                limit=5,
+            )
+            for result in results:
+                point_id = self._extract_point_id(result)
+                if point_id and self._state.is_already_pushed(point_id):
+                    continue
+                return result
+        return None
+
+    async def check_stale_memory(self, entries: list, collection_name: str) -> None:
+        """Send a warning notification for any entry whose stored_at is older than STALE_MEMORY_DAYS."""
+        now = datetime.now(timezone.utc)
+        for entry in entries:
+            stored_at = self._parse_stored_at(entry)
+            if stored_at is None:
+                continue
+            age_days = (now - stored_at).days
+            if age_days < STALE_MEMORY_DAYS:
+                continue
+            meta = {
+                "type": "stale_memory",
+                "collection": collection_name,
+                "age_days": str(age_days),
+            }
+            await self._notifier.send(self._session, entry.content, meta)
+
+    def record_retrieval(self, point_id: str) -> None:
+        """Record that the agent retrieved a pushed point, resetting backoff."""
+        self._state.record_retrieval(point_id)
+
+    @staticmethod
+    def _extract_point_id(entry: Any) -> str | None:
+        if entry.metadata and "id" in entry.metadata:
+            return str(entry.metadata["id"])
+        return None
+
+    @staticmethod
+    def _parse_stored_at(entry: Any) -> "datetime | None":
+        if not entry.metadata:
+            return None
+        raw = entry.metadata.get("stored_at")
+        if not raw:
+            return None
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except (ValueError, AttributeError):
+            return None
