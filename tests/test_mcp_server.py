@@ -5,6 +5,8 @@ import pytest
 from mcp_server_qdrant.mcp_server import QdrantMCPServer
 from mcp_server_qdrant.settings import QdrantSettings, ToolSettings
 
+
+
 ENV_VARS_TO_CLEAN = [
     "QDRANT_URL",
     "QDRANT_API_KEY",
@@ -17,7 +19,14 @@ ENV_VARS_TO_CLEAN = [
     "SPARSE_MODEL",
     "TOOL_STORE_DESCRIPTION",
     "TOOL_FIND_DESCRIPTION",
+    "QDRANT_CHANNEL_ENABLED",
 ]
+
+
+@pytest.fixture
+def clean_env(monkeypatch):
+    for var in ENV_VARS_TO_CLEAN:
+        monkeypatch.delenv(var, raising=False)
 
 
 def make_mock_embedding_provider():
@@ -190,3 +199,28 @@ class TestSetupToolsNoConfig:
         assert "qdrant-find" in tool_names
         assert "qdrant-store" in tool_names
         assert len(tool_names) == 3
+
+
+def create_server() -> QdrantMCPServer:
+    return QdrantMCPServer(
+        tool_settings=ToolSettings(),
+        qdrant_settings=QdrantSettings(),
+        embedding_provider=make_mock_embedding_provider(),
+    )
+
+
+class TestChannelCapability:
+    def test_channel_capability_declared_when_enabled(self, clean_env, monkeypatch):
+        monkeypatch.setenv("QDRANT_CHANNEL_ENABLED", "true")
+        monkeypatch.setenv("COLLECTION_NAME", "test")
+        monkeypatch.setenv("EMBEDDING_PROVIDER", "fastembed")
+        monkeypatch.setenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+        server = create_server()
+        assert server._qdrant_settings.channel_enabled is True
+
+    def test_channel_settings_stored(self, clean_env, monkeypatch):
+        monkeypatch.setenv("COLLECTION_NAME", "test")
+        monkeypatch.setenv("EMBEDDING_PROVIDER", "fastembed")
+        monkeypatch.setenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+        server = create_server()
+        assert server._qdrant_settings.channel_enabled is False

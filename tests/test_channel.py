@@ -1,7 +1,9 @@
 import pytest
+import tempfile
+import os
 import time
 from unittest.mock import AsyncMock, MagicMock
-from mcp_server_qdrant.channel import ChannelSessionState, ChannelNotifier
+from mcp_server_qdrant.channel import ChannelSessionState, ChannelNotifier, JournalWatcher
 
 
 class TestChannelSessionState:
@@ -82,3 +84,63 @@ class TestChannelNotifier:
             meta={"type": "memory_match", "point_id": "abc"},
         )
         mock_write_stream.send.assert_called_once()
+
+
+class TestJournalWatcher:
+    def test_parse_journal_entries(self):
+        entries = JournalWatcher.parse_entries(
+            '{"tool":"Read","file":"src/hooks/test.sh","ts":"2026-03-20T01:30:00Z"}\n'
+            '{"tool":"Grep","pattern":"channel","ts":"2026-03-20T01:30:05Z"}\n'
+        )
+        assert len(entries) == 2
+        assert entries[0]["file"] == "src/hooks/test.sh"
+        assert entries[1]["pattern"] == "channel"
+
+    def test_extract_search_text(self):
+        entries = [
+            {"tool": "Read", "file": "src/hooks/session-start.sh"},
+            {"tool": "Grep", "pattern": "channelMessage"},
+            {"tool": "Edit", "file": "src/server.ts"},
+        ]
+        text = JournalWatcher.extract_search_text(entries)
+        assert "hooks" in text
+        assert "session-start" in text
+        assert "channelMessage" in text
+        assert "server" in text
+
+    def test_read_new_entries(self):
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+            f.write('{"tool":"Read","file":"a.py","ts":"2026-03-20T01:00:00Z"}\n')
+            f.write('{"tool":"Edit","file":"b.py","ts":"2026-03-20T01:00:01Z"}\n')
+            path = f.name
+        try:
+            watcher = JournalWatcher(path)
+            entries = watcher.read_new_entries()
+            assert len(entries) == 2
+            entries2 = watcher.read_new_entries()
+            assert len(entries2) == 0
+        finally:
+            os.unlink(path)
+
+    def test_read_new_entries_appended(self):
+        """Test that watcher picks up entries appended after first read."""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+            f.write('{"tool":"Read","file":"a.py","ts":"2026-03-20T01:00:00Z"}\n')
+            path = f.name
+        try:
+            watcher = JournalWatcher(path)
+            entries = watcher.read_new_entries()
+            assert len(entries) == 1
+            # Append more
+            with open(path, 'a') as f:
+                f.write('{"tool":"Edit","file":"c.py","ts":"2026-03-20T01:00:02Z"}\n')
+            entries2 = watcher.read_new_entries()
+            assert len(entries2) == 1
+            assert entries2[0]["file"] == "c.py"
+        finally:
+            os.unlink(path)
+
+    def test_read_nonexistent_file(self):
+        watcher = JournalWatcher("/tmp/nonexistent-journal-12345.jsonl")
+        entries = watcher.read_new_entries()
+        assert len(entries) == 0

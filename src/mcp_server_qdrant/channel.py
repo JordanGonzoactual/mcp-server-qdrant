@@ -1,7 +1,10 @@
 """Channel adapter for proactive MCP notifications."""
 
+import json
+import os
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from mcp.types import JSONRPCNotification
 from mcp.shared.message import SessionMessage
@@ -73,3 +76,54 @@ class ChannelNotifier:
         """Send via private _write_stream bypass (no public API for custom notifications)."""
         notification = self.build_notification(content, meta)
         await session._write_stream.send(SessionMessage(message=notification))
+
+
+class JournalWatcher:
+    """Reads new entries from the context journal file."""
+
+    def __init__(self, journal_path: str):
+        self.journal_path = journal_path
+        self._file_offset: int = 0
+
+    def read_new_entries(self) -> list[dict]:
+        if not os.path.exists(self.journal_path):
+            return []
+        try:
+            with open(self.journal_path, 'r') as f:
+                f.seek(self._file_offset)
+                new_data = f.read()
+                self._file_offset = f.tell()
+            if not new_data.strip():
+                return []
+            return self.parse_entries(new_data)
+        except (OSError, json.JSONDecodeError):
+            return []
+
+    @staticmethod
+    def parse_entries(raw: str) -> list[dict]:
+        entries = []
+        for line in raw.strip().split('\n'):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return entries
+
+    @staticmethod
+    def extract_search_text(entries: list[dict]) -> str:
+        parts = []
+        for entry in entries:
+            if 'file' in entry:
+                p = Path(entry['file'])
+                parts.extend(p.parts[-3:])
+                parts.append(p.stem)
+            if 'pattern' in entry:
+                parts.append(entry['pattern'])
+            if 'command' in entry:
+                parts.append(entry['command'])
+            if 'description' in entry:
+                parts.append(entry['description'])
+        return ' '.join(parts)
