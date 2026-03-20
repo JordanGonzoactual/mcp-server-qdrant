@@ -332,7 +332,10 @@ class QdrantMCPServer(FastMCP):
 
         orchestrator = ChannelOrchestrator(
             connector=self.qdrant_connector,
-            collections=settings.qdrant_collections,  # type: ignore[arg-type]
+            collections={
+                k: v for k, v in (settings.qdrant_collections or {}).items()
+                if k == "memory"
+            },
             session=_WriteStreamProxy(write_stream),
             journal_path=settings.channel_journal_path,  # type: ignore[arg-type]
             similarity_threshold=settings.channel_similarity_threshold,
