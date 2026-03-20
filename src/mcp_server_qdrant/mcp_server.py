@@ -2,12 +2,14 @@ import json
 import logging
 from typing import Annotated, Any, Optional
 
+import anyio
 from fastmcp import Context, FastMCP
 from mcp.server.lowlevel.server import NotificationOptions
 from mcp.server.stdio import stdio_server
 from pydantic import Field
 from qdrant_client import models
 
+from mcp_server_qdrant.channel import ChannelOrchestrator
 from mcp_server_qdrant.common.filters import make_indexes
 from mcp_server_qdrant.common.func_tools import make_partial_function
 from mcp_server_qdrant.common.wrap_filters import wrap_filters
@@ -302,4 +304,51 @@ class QdrantMCPServer(FastMCP):
 
         async with stdio_server() as (read_stream, write_stream):
             logger.info(f"Starting MCP server {self.name!r} with transport 'stdio'")
+
+            if self._should_run_channel_watcher():
+                await self._run_with_channel_watcher(
+                    read_stream, write_stream, init_options
+                )
+            else:
+                await self._mcp_server.run(read_stream, write_stream, init_options)
+
+    def _should_run_channel_watcher(self) -> bool:
+        settings = self._qdrant_settings
+        return bool(
+            settings.channel_enabled
+            and settings.channel_journal_path
+            and settings.qdrant_collections
+        )
+
+    async def _run_with_channel_watcher(
+        self, read_stream: Any, write_stream: Any, init_options: Any
+    ) -> None:
+        """Run the MCP server alongside a background journal watcher task."""
+        settings = self._qdrant_settings
+
+        class _WriteStreamProxy:
+            def __init__(self, ws: Any) -> None:
+                self._write_stream = ws
+
+        orchestrator = ChannelOrchestrator(
+            connector=self.qdrant_connector,
+            collections=settings.qdrant_collections,  # type: ignore[arg-type]
+            session=_WriteStreamProxy(write_stream),
+            journal_path=settings.channel_journal_path,  # type: ignore[arg-type]
+            similarity_threshold=settings.channel_similarity_threshold,
+            cooldown_seconds=settings.channel_cooldown_seconds,
+            max_per_session=settings.channel_max_per_session,
+        )
+
+        async def _watch_journal() -> None:
+            while True:
+                await anyio.sleep(5)
+                try:
+                    await orchestrator.check_journal()
+                except Exception:
+                    logger.exception("Channel journal watcher error (suppressed)")
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(_watch_journal)
             await self._mcp_server.run(read_stream, write_stream, init_options)
+            tg.cancel_scope.cancel()

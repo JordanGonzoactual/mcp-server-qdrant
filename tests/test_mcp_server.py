@@ -1,5 +1,6 @@
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import anyio
 import pytest
 
 from mcp_server_qdrant.mcp_server import QdrantMCPServer
@@ -207,3 +208,126 @@ class TestChannelCapability:
         monkeypatch.setenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
         server = create_server()
         assert server._qdrant_settings.channel_enabled is False
+
+
+class TestRunStdioAsyncChannelIntegration:
+    """Tests that run_stdio_async wires ChannelOrchestrator when channel is enabled."""
+
+    @pytest.mark.asyncio
+    async def test_journal_watcher_started_when_channel_enabled(
+        self, clean_env, monkeypatch, tmp_path
+    ):
+        """When channel_enabled and channel_journal_path are set, check_journal is called."""
+        journal_file = tmp_path / "test_journal.jsonl"
+        journal_file.write_text("")
+
+        monkeypatch.setenv("QDRANT_CHANNEL_ENABLED", "true")
+        monkeypatch.setenv(
+            "QDRANT_CHANNEL_JOURNAL_PATH", str(journal_file)
+        )
+        monkeypatch.setenv(
+            "QDRANT_COLLECTIONS", "memory:mem-collection"
+        )
+
+        server = QdrantMCPServer(
+            tool_settings=ToolSettings(),
+            qdrant_settings=QdrantSettings(),
+            embedding_provider=make_mock_embedding_provider(),
+        )
+
+        check_journal_calls = []
+
+        async def fake_check_journal():
+            check_journal_calls.append(1)
+
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.check_journal = fake_check_journal
+
+        fake_read_stream = MagicMock()
+        fake_write_stream = MagicMock()
+
+        async def fake_mcp_run(rs, ws, opts, **kwargs):
+            # Simulate a brief server run then exit
+            await anyio.sleep(0.02)
+
+        with patch(
+            "mcp_server_qdrant.mcp_server.ChannelOrchestrator",
+            return_value=mock_orchestrator,
+        ) as MockOrch:
+            with patch.object(server._mcp_server, "run", side_effect=fake_mcp_run):
+                with patch(
+                    "mcp_server_qdrant.mcp_server.stdio_server"
+                ) as mock_stdio:
+                    mock_stdio.return_value.__aenter__ = AsyncMock(
+                        return_value=(fake_read_stream, fake_write_stream)
+                    )
+                    mock_stdio.return_value.__aexit__ = AsyncMock(return_value=False)
+                    await server.run_stdio_async()
+
+        assert MockOrch.called
+        call_kwargs = MockOrch.call_args
+        assert call_kwargs.kwargs["connector"] is server.qdrant_connector
+        assert call_kwargs.kwargs["collections"] == {"memory": "mem-collection"}
+        assert call_kwargs.kwargs["journal_path"] == str(journal_file)
+
+    @pytest.mark.asyncio
+    async def test_journal_watcher_not_started_when_channel_disabled(
+        self, clean_env, monkeypatch
+    ):
+        """When channel_enabled is False, ChannelOrchestrator is not instantiated."""
+        server = QdrantMCPServer(
+            tool_settings=ToolSettings(),
+            qdrant_settings=QdrantSettings(),
+            embedding_provider=make_mock_embedding_provider(),
+        )
+
+        async def fake_mcp_run(rs, ws, opts, **kwargs):
+            await anyio.sleep(0)
+
+        with patch(
+            "mcp_server_qdrant.mcp_server.ChannelOrchestrator"
+        ) as MockOrch:
+            with patch.object(server._mcp_server, "run", side_effect=fake_mcp_run):
+                with patch(
+                    "mcp_server_qdrant.mcp_server.stdio_server"
+                ) as mock_stdio:
+                    mock_stdio.return_value.__aenter__ = AsyncMock(
+                        return_value=(MagicMock(), MagicMock())
+                    )
+                    mock_stdio.return_value.__aexit__ = AsyncMock(return_value=False)
+                    await server.run_stdio_async()
+
+        MockOrch.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_journal_watcher_not_started_when_no_journal_path(
+        self, clean_env, monkeypatch
+    ):
+        """When channel_enabled but no journal_path, ChannelOrchestrator is not instantiated."""
+        monkeypatch.setenv("QDRANT_CHANNEL_ENABLED", "true")
+        monkeypatch.setenv("QDRANT_COLLECTIONS", "memory:mem-collection")
+        # No QDRANT_CHANNEL_JOURNAL_PATH set
+
+        server = QdrantMCPServer(
+            tool_settings=ToolSettings(),
+            qdrant_settings=QdrantSettings(),
+            embedding_provider=make_mock_embedding_provider(),
+        )
+
+        async def fake_mcp_run(rs, ws, opts, **kwargs):
+            await anyio.sleep(0)
+
+        with patch(
+            "mcp_server_qdrant.mcp_server.ChannelOrchestrator"
+        ) as MockOrch:
+            with patch.object(server._mcp_server, "run", side_effect=fake_mcp_run):
+                with patch(
+                    "mcp_server_qdrant.mcp_server.stdio_server"
+                ) as mock_stdio:
+                    mock_stdio.return_value.__aenter__ = AsyncMock(
+                        return_value=(MagicMock(), MagicMock())
+                    )
+                    mock_stdio.return_value.__aexit__ = AsyncMock(return_value=False)
+                    await server.run_stdio_async()
+
+        MockOrch.assert_not_called()
