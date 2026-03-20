@@ -168,9 +168,11 @@ class ChannelOrchestrator:
         if not search_text.strip():
             return
 
-        best_entry = await self._find_best_match(search_text)
-        if best_entry is None:
+        match = await self._find_best_match(search_text)
+        if match is None:
             return
+
+        best_entry, collection_label = match
 
         if not self._state.can_push():
             return
@@ -179,14 +181,18 @@ class ChannelOrchestrator:
         if point_id and self._state.is_already_pushed(point_id):
             return
 
+        # Truncate to ~200 chars with retrieval hint
+        summary = best_entry.content[:180].rsplit(" ", 1)[0]
+        tool_name = f"qdrant-find-{collection_label}"
+        content = f"{summary}... Use {tool_name} for full context."
         meta = {"type": "memory_match", "point_id": point_id or ""}
-        await self._notifier.send(self._session, best_entry.content, meta)
+        await self._notifier.send(self._session, content, meta)
         if point_id:
             self._state.record_push(point_id)
 
     async def _find_best_match(self, search_text: str):
-        """Search all collections and return the first unpushed result, or None."""
-        for _label, collection_name in self._collections.items():
+        """Search all collections and return (entry, label) for the first unpushed result, or None."""
+        for label, collection_name in self._collections.items():
             results = await self._connector.search(
                 search_text,
                 collection_name=collection_name,
@@ -196,7 +202,7 @@ class ChannelOrchestrator:
                 point_id = self._extract_point_id(result)
                 if point_id and self._state.is_already_pushed(point_id):
                     continue
-                return result
+                return result, label
         return None
 
     async def check_stale_memory(self, entries: list, collection_name: str) -> None:
