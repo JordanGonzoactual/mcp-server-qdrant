@@ -110,6 +110,20 @@ class QdrantSettings(BaseSettings):
         default=None, validation_alias="QDRANT_COLLECTIONS"
     )
 
+    channel_enabled: bool = Field(default=False, validation_alias="QDRANT_CHANNEL_ENABLED")
+    channel_journal_path: str | None = Field(
+        default=None, validation_alias="QDRANT_CHANNEL_JOURNAL_PATH"
+    )
+    channel_similarity_threshold: float = Field(
+        default=0.85, validation_alias="QDRANT_CHANNEL_SIMILARITY_THRESHOLD"
+    )
+    channel_cooldown_seconds: int = Field(
+        default=60, validation_alias="QDRANT_CHANNEL_COOLDOWN_SECONDS"
+    )
+    channel_max_per_session: int = Field(
+        default=20, validation_alias="QDRANT_CHANNEL_MAX_PER_SESSION"
+    )
+
     @field_validator("qdrant_collections", mode="before")
     @classmethod
     def parse_qdrant_collections(cls, value: object) -> dict[str, str] | None:

@@ -9,6 +9,20 @@ from mcp_server_qdrant.settings import (
     ToolSettings,
 )
 
+CHANNEL_ENV_VARS = [
+    "QDRANT_CHANNEL_ENABLED",
+    "QDRANT_CHANNEL_JOURNAL_PATH",
+    "QDRANT_CHANNEL_SIMILARITY_THRESHOLD",
+    "QDRANT_CHANNEL_COOLDOWN_SECONDS",
+    "QDRANT_CHANNEL_MAX_PER_SESSION",
+]
+
+
+@pytest.fixture
+def clean_env(monkeypatch):
+    for var in CHANNEL_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+
 
 class TestQdrantSettings:
     def test_default_values(self):
@@ -231,3 +245,20 @@ class TestToolSettings:
         settings = ToolSettings()
         assert settings.get_find_description("memory") == "Custom memory find"
         assert settings.get_find_description("research") == DEFAULT_TOOL_FIND_DESCRIPTION
+
+
+class TestChannelSettings:
+    def test_channel_defaults(self, clean_env):
+        settings = QdrantSettings()
+        assert settings.channel_enabled is False
+        assert settings.channel_journal_path is None
+        assert settings.channel_similarity_threshold == 0.85
+        assert settings.channel_cooldown_seconds == 60
+        assert settings.channel_max_per_session == 20
+
+    def test_channel_enabled_via_env(self, clean_env, monkeypatch):
+        monkeypatch.setenv("QDRANT_CHANNEL_ENABLED", "true")
+        monkeypatch.setenv("QDRANT_CHANNEL_JOURNAL_PATH", "/tmp/test-journal.jsonl")
+        settings = QdrantSettings()
+        assert settings.channel_enabled is True
+        assert settings.channel_journal_path == "/tmp/test-journal.jsonl"
