@@ -3,6 +3,9 @@
 import time
 from dataclasses import dataclass, field
 
+from mcp.types import JSONRPCNotification
+from mcp.shared.message import SessionMessage
+
 
 @dataclass
 class ChannelSessionState:
@@ -45,3 +48,28 @@ class ChannelSessionState:
 
     def mark_session_context_sent(self) -> None:
         self.session_context_sent = True
+
+
+class ChannelNotifier:
+    """Builds and sends channel notifications via MCP protocol."""
+
+    CHANNEL_METHOD = "notifications/claude/channel"
+
+    def build_notification(
+        self, content: str, meta: dict[str, str] | None = None
+    ) -> JSONRPCNotification:
+        return JSONRPCNotification(
+            jsonrpc="2.0",
+            method=self.CHANNEL_METHOD,
+            params={"content": content, "meta": meta or {}},
+        )
+
+    async def send(
+        self,
+        session: object,
+        content: str,
+        meta: dict[str, str] | None = None,
+    ) -> None:
+        """Send via private _write_stream bypass (no public API for custom notifications)."""
+        notification = self.build_notification(content, meta)
+        await session._write_stream.send(SessionMessage(message=notification))

@@ -1,6 +1,7 @@
 import pytest
 import time
-from mcp_server_qdrant.channel import ChannelSessionState
+from unittest.mock import AsyncMock, MagicMock
+from mcp_server_qdrant.channel import ChannelSessionState, ChannelNotifier
 
 
 class TestChannelSessionState:
@@ -54,3 +55,30 @@ class TestChannelSessionState:
         assert state.session_context_sent is False
         state.mark_session_context_sent()
         assert state.session_context_sent is True
+
+
+class TestChannelNotifier:
+    @pytest.mark.asyncio
+    async def test_build_notification(self):
+        notifier = ChannelNotifier()
+        notif = notifier.build_notification(
+            content="Decision exists: use async hooks.",
+            meta={"type": "memory_match", "score": "0.91", "point_id": "abc123"},
+        )
+        assert notif.method == "notifications/claude/channel"
+        assert notif.params["content"] == "Decision exists: use async hooks."
+        assert notif.params["meta"]["type"] == "memory_match"
+
+    @pytest.mark.asyncio
+    async def test_send_notification(self):
+        mock_write_stream = AsyncMock()
+        mock_session = MagicMock()
+        mock_session._write_stream = mock_write_stream
+
+        notifier = ChannelNotifier()
+        await notifier.send(
+            session=mock_session,
+            content="Test message",
+            meta={"type": "memory_match", "point_id": "abc"},
+        )
+        mock_write_stream.send.assert_called_once()
