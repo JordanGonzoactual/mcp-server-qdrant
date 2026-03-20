@@ -146,9 +146,11 @@ class ChannelOrchestrator:
         similarity_threshold: float = 0.80,
         cooldown_seconds: int = 60,
         max_per_session: int = 20,
+        project_filter: str | None = None,
     ) -> None:
         self._connector = connector
         self._collections = collections
+        self._project_filter = project_filter
         self._session = session
         self._similarity_threshold = similarity_threshold
         self._state = ChannelSessionState(
@@ -190,13 +192,29 @@ class ChannelOrchestrator:
         if point_id:
             self._state.record_push(point_id)
 
+    def _build_project_filter(self):
+        """Build a Qdrant filter to match only the configured project tag."""
+        if not self._project_filter:
+            return None
+        from qdrant_client import models
+        return models.Filter(
+            must=[
+                models.FieldCondition(
+                    key="metadata.project",
+                    match=models.MatchValue(value=self._project_filter),
+                )
+            ]
+        )
+
     async def _find_best_match(self, search_text: str):
         """Search all collections and return (entry, label) for the first unpushed result, or None."""
+        query_filter = self._build_project_filter()
         for label, collection_name in self._collections.items():
             results = await self._connector.search(
                 search_text,
                 collection_name=collection_name,
                 limit=5,
+                query_filter=query_filter,
             )
             for result in results:
                 point_id = self._extract_point_id(result)

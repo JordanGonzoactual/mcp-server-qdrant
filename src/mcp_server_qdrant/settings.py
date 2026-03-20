@@ -123,6 +123,9 @@ class QdrantSettings(BaseSettings):
     channel_max_per_session: int = Field(
         default=20, validation_alias="QDRANT_CHANNEL_MAX_PER_SESSION"
     )
+    channel_project_filter: str | None = Field(
+        default=None, validation_alias="QDRANT_CHANNEL_PROJECT_FILTER"
+    )
 
     @field_validator("qdrant_collections", mode="before")
     @classmethod

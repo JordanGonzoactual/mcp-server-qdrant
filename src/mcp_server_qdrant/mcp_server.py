@@ -338,6 +338,7 @@ class QdrantMCPServer(FastMCP):
             similarity_threshold=settings.channel_similarity_threshold,
             cooldown_seconds=settings.channel_cooldown_seconds,
             max_per_session=settings.channel_max_per_session,
+            project_filter=settings.channel_project_filter,
         )
 
         async def _watch_journal() -> None:
