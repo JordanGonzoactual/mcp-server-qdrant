@@ -16,6 +16,6 @@ def create_embedding_provider(settings: EmbeddingProviderSettings) -> EmbeddingP
     elif settings.provider_type == EmbeddingProviderType.CLOUD:
         from mcp_server_qdrant.embeddings.cloud import CloudInferenceProvider
 
-        return CloudInferenceProvider(settings.model_name)
+        return CloudInferenceProvider(settings.model_name, settings.output_dimension)
     else:
         raise ValueError(f"Unsupported embedding provider: {settings.provider_type}")

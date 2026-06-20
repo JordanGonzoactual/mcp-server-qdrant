@@ -2,20 +2,28 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install uv for package management
+# Install uv for package management.
 RUN pip install --no-cache-dir uv
 
-# Install the mcp-server-qdrant package
-RUN uv pip install --system --no-cache-dir mcp-server-qdrant
+# Copy local source so container builds include branch-specific changes.
+COPY pyproject.toml uv.lock README.md ./
+COPY src ./src
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-# Expose the default port for SSE transport
+# Install the package from the locked dependency set.
+RUN uv sync --frozen --no-dev \
+    && chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# Expose the default port for HTTP MCP transports.
 EXPOSE 8000
 
-# Set environment variables with defaults that can be overridden at runtime
-ENV QDRANT_URL=""
-ENV QDRANT_API_KEY=""
-ENV COLLECTION_NAME="default-collection"
-ENV EMBEDDING_MODEL="sentence-transformers/all-MiniLM-L6-v2"
+# Listen on all interfaces so Docker port publishing works.
+ENV PATH="/app/.venv/bin:${PATH}"
+ENV FASTMCP_SERVER_HOST="0.0.0.0"
+ENV FASTMCP_SERVER_PORT="8000"
+# Legacy envs kept for compatibility with older FastMCP variants.
+ENV FASTMCP_HOST="0.0.0.0"
+ENV FASTMCP_PORT="8000"
+ENV MCP_TRANSPORT="streamable-http"
 
-# Run the server with SSE transport
-CMD uvx mcp-server-qdrant --transport sse
+ENTRYPOINT ["docker-entrypoint.sh"]

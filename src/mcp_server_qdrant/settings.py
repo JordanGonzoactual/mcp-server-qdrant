@@ -61,6 +61,34 @@ class EmbeddingProviderSettings(BaseSettings):
         description="Sparse embedding model for hybrid search (e.g., 'qdrant/bm25'). "
         "Only used with EMBEDDING_PROVIDER=cloud.",
     )
+    output_dimension: int | None = Field(
+        default=None,
+        validation_alias="EMBEDDING_OUTPUT_DIMENSION",
+        description="Output vector dimensionality for external proxied models that "
+        "support it (e.g. cohere/embed-v4.0 supports 256/512/1024/1536). Must match "
+        "the collection's configured vector size.",
+    )
+
+
+class RerankSettings(BaseSettings):
+    """
+    Configuration for an optional Voyage reranking stage applied to the fused
+    (dense + sparse) candidate set before results are returned.
+    """
+
+    enabled: bool = Field(default=False, validation_alias="QDRANT_RERANK_ENABLED")
+    model: str = Field(default="rerank-2.5", validation_alias="QDRANT_RERANK_MODEL")
+    api_key: str | None = Field(default=None, validation_alias="VOYAGE_API_KEY")
+    candidate_limit: int = Field(
+        default=40,
+        validation_alias="QDRANT_RERANK_CANDIDATE_LIMIT",
+        description="How many fused candidates to fetch and hand to the reranker "
+        "before truncating to the requested result limit.",
+    )
+    base_url: str = Field(
+        default="https://api.voyageai.com/v1/rerank",
+        validation_alias="QDRANT_RERANK_URL",
+    )
 
 
 class FilterableField(BaseModel):
@@ -126,6 +154,24 @@ class QdrantSettings(BaseSettings):
     channel_project_filter: str | None = Field(
         default=None, validation_alias="QDRANT_CHANNEL_PROJECT_FILTER"
     )
+    channel_suppress_tags: list[str] | None = Field(
+        default=None, validation_alias="QDRANT_CHANNEL_SUPPRESS_TAGS"
+    )
+    channel_episode_max_age_days: int = Field(
+        default=14, validation_alias="QDRANT_CHANNEL_EPISODE_MAX_AGE_DAYS"
+    )
+
+    @field_validator("channel_suppress_tags", mode="before")
+    @classmethod
+    def parse_channel_suppress_tags(cls, value: object) -> list[str] | None:
+        if value is None:
+            return None
+        if isinstance(value, list):
+            return value
+        if not isinstance(value, str):
+            return None
+        tags = [t.strip() for t in value.split(",") if t.strip()]
+        return tags or None
 
     @field_validator("qdrant_collections", mode="before")
     @classmethod

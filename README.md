@@ -63,8 +63,8 @@ important ones are listed below:
 |---------------------------------------|-----------------------------------------------------------|---------------|
 | `FASTMCP_DEBUG`                       | Enable debug mode                                         | `false`       |
 | `FASTMCP_LOG_LEVEL`                   | Set logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL) | `INFO`        |
-| `FASTMCP_HOST`                        | Host address to bind the server to                        | `127.0.0.1`   |
-| `FASTMCP_PORT`                        | Port to run the server on                                 | `8000`        |
+| `FASTMCP_SERVER_HOST`                 | Host address to bind the server to                        | `127.0.0.1`   |
+| `FASTMCP_SERVER_PORT`                 | Port to run the server on                                 | `8000`        |
 | `FASTMCP_WARN_ON_DUPLICATE_RESOURCES` | Show warnings for duplicate resources                     | `true`        |
 | `FASTMCP_WARN_ON_DUPLICATE_TOOLS`     | Show warnings for duplicate tools                         | `true`        |
 | `FASTMCP_WARN_ON_DUPLICATE_PROMPTS`   | Show warnings for duplicate prompts                       | `true`        |
@@ -90,7 +90,7 @@ The server supports different transport protocols that can be specified using th
 ```shell
 QDRANT_URL="http://localhost:6333" \
 COLLECTION_NAME="my-collection" \
-uvx mcp-server-qdrant --transport sse
+uvx mcp-server-qdrant --transport streamable-http
 ```
 
 Supported transport protocols:
@@ -101,36 +101,79 @@ Supported transport protocols:
 
 The default transport is `stdio` if not specified.
 
-When SSE transport is used, the server will listen on the specified port and wait for incoming connections. The default
-port is 8000, however it can be changed using the `FASTMCP_PORT` environment variable.
+When `sse` or `streamable-http` transport is used, the server will listen on the specified port and wait for incoming
+connections. The default port is 8000, however it can be changed using the `FASTMCP_SERVER_PORT` environment variable.
 
 ```shell
 QDRANT_URL="http://localhost:6333" \
-COLLECTION_NAME="my-collection" \
-FASTMCP_PORT=1234 \
-uvx mcp-server-qdrant --transport sse
+QDRANT_COLLECTIONS="research:KnowledgeMap,memory:mem-training-simulator" \
+EMBEDDING_PROVIDER="cloud" \
+EMBEDDING_MODEL="mixedbread-ai/mxbai-embed-large-v1" \
+SPARSE_MODEL="qdrant/bm25" \
+FASTMCP_SERVER_PORT=1234 \
+uvx mcp-server-qdrant --transport streamable-http
 ```
 
 ### Using Docker
 
-A Dockerfile is available for building and running the MCP server:
+A Dockerfile is available for building and running the MCP server from your local checkout. This is useful when you
+have branch-specific changes that are not published to PyPI yet.
 
 ```bash
-# Build the container
+# Build the container from the local repo
 docker build -t mcp-server-qdrant .
 
-# Run the container
-docker run -p 8000:8000 \
-  -e FASTMCP_HOST="0.0.0.0" \
-  -e QDRANT_URL="http://your-qdrant-server:6333" \
+# Run the container with Streamable HTTP transport on port 8000
+# (default MCP_TRANSPORT=streamable-http)
+docker run --rm -p 8000:8000 \
+  -e QDRANT_URL="https://your-qdrant-cluster.cloud.qdrant.io" \
   -e QDRANT_API_KEY="your-api-key" \
-  -e COLLECTION_NAME="your-collection" \
+  -e QDRANT_COLLECTIONS="research:KnowledgeMap,memory:mem-training-simulator" \
+  -e EMBEDDING_PROVIDER="cloud" \
+  -e EMBEDDING_MODEL="mixedbread-ai/mxbai-embed-large-v1" \
+  -e SPARSE_MODEL="qdrant/bm25" \
+  -e TOOL_FIND_DESCRIPTION_MEMORY="Search project memory for architecture patterns, decisions, tech context, and session history." \
+  -e TOOL_STORE_DESCRIPTION_MEMORY="Store project memory: architecture patterns, decisions, tech context, session episodes." \
   mcp-server-qdrant
 ```
 
-> [!TIP]
-> Please note that we set `FASTMCP_HOST="0.0.0.0"` to make the server listen on all network interfaces. This is
-> necessary when running the server in a Docker container.
+The container defaults to:
+
+- `FASTMCP_SERVER_HOST=0.0.0.0`
+- `FASTMCP_SERVER_PORT=8000`
+- `MCP_TRANSPORT=streamable-http`
+
+The `MCP_TRANSPORT` environment variable supports all server transports (`stdio`, `sse`, `streamable-http`) without
+rebuilding the image.
+
+```bash
+# Run with SSE transport
+docker run --rm -p 8000:8000 \
+  -e MCP_TRANSPORT="sse" \
+  -e QDRANT_URL="http://host.docker.internal:6333" \
+  -e COLLECTION_NAME="my-collection" \
+  mcp-server-qdrant
+
+# Run with stdio transport (for local MCP clients that spawn docker)
+docker run --rm -i \
+  -e MCP_TRANSPORT="stdio" \
+  -e QDRANT_URL="http://host.docker.internal:6333" \
+  -e COLLECTION_NAME="my-collection" \
+  mcp-server-qdrant
+```
+
+If you use local storage or channel journaling in the container, mount host paths so state persists:
+
+```bash
+docker run --rm -p 8000:8000 \
+  -e QDRANT_LOCAL_PATH="/data/qdrant" \
+  -e QDRANT_CHANNEL_ENABLED="true" \
+  -e QDRANT_CHANNEL_JOURNAL_PATH="/data/channel/journal.jsonl" \
+  -e COLLECTION_NAME="my-collection" \
+  -v "$(pwd)/.docker-data/qdrant:/data/qdrant" \
+  -v "$(pwd)/.docker-data/channel:/data/channel" \
+  mcp-server-qdrant
+```
 
 ### Installing via Smithery
 
@@ -142,7 +185,7 @@ npx @smithery/cli install mcp-server-qdrant --client claude
 
 ### Manual configuration of Claude Desktop
 
-To use this server with the Claude Desktop app, add the following configuration to the "mcpServers" section of your
+To use this server with the Claude Desktop app, add the following configuration to the `"mcpServers"` section of your
 `claude_desktop_config.json`:
 
 ```json
@@ -181,6 +224,25 @@ This MCP server will automatically create a collection with the specified name i
 By default, the server will use the `sentence-transformers/all-MiniLM-L6-v2` embedding model to encode memories.
 For the time being, only [FastEmbed](https://qdrant.github.io/fastembed/) models are supported.
 
+### Manual configuration of Codex / remote HTTP MCP clients
+
+If you are running the server in Docker with `--transport streamable-http`, point your MCP client at the `/mcp`
+endpoint instead of spawning `uvx` in each session.
+
+```json
+{
+  "mcpServers": {
+    "qdrant": {
+      "type": "http",
+      "url": "http://127.0.0.1:8000/mcp"
+    }
+  }
+}
+```
+
+This setup is a good fit for Codex and other clients that work better with a persistent MCP endpoint than with a
+session-local stdio process.
+
 ## Support for other tools
 
 This MCP server can be used with any MCP-compatible client. For example, you can use it with
@@ -204,21 +266,21 @@ TOOL_FIND_DESCRIPTION="Search for relevant code snippets based on natural langua
 The 'query' parameter should describe what you're looking for, \
 and the tool will return the most relevant code snippets. \
 Use this when you need to find existing code snippets for reuse or reference." \
-uvx mcp-server-qdrant --transport sse # Enable SSE transport
+uvx mcp-server-qdrant --transport streamable-http
 ```
 
 In Cursor/Windsurf, you can then configure the MCP server in your settings by pointing to this running server using
-SSE transport protocol. The description on how to add an MCP server to Cursor can be found in the [Cursor
+Streamable HTTP transport. The description on how to add an MCP server to Cursor can be found in the [Cursor
 documentation](https://docs.cursor.com/context/model-context-protocol#adding-an-mcp-server-to-cursor). If you are
 running Cursor/Windsurf locally, you can use the following URL:
 
 ```
-http://localhost:8000/sse
+http://localhost:8000/mcp
 ```
 
 > [!TIP]
-> We suggest SSE transport as a preferred way to connect Cursor/Windsurf to the MCP server, as it can support remote
-> connections. That makes it easy to share the server with your team or use it in a cloud environment.
+> We suggest Streamable HTTP as the preferred remote transport because it works well for persistent local or shared
+> MCP endpoints. SSE remains available if your client specifically prefers it.
 
 This configuration transforms the Qdrant MCP server into a specialized code search tool that can:
 

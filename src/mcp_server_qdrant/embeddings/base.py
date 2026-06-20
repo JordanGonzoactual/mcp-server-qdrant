@@ -23,3 +23,12 @@ class EmbeddingProvider(ABC):
     def get_vector_size(self) -> int:
         """Get the size of the vector for the Qdrant collection."""
         pass
+
+    def document_options(self, input_type: str | None) -> dict | None:
+        """Per-request inference options for a models.Document.
+
+        Returns None for providers that embed locally or need no options; cloud
+        inference with an external proxied provider overrides this to carry the
+        provider API key and params (output dimension, input_type).
+        """
+        return None

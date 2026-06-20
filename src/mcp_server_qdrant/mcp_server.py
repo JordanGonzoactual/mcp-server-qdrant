@@ -4,6 +4,7 @@ from typing import Annotated, Any, Optional
 
 import anyio
 from fastmcp import Context, FastMCP
+from fastmcp.server.dependencies import get_http_headers
 from mcp.server.lowlevel.server import NotificationOptions
 from mcp.server.stdio import stdio_server
 from pydantic import Field
@@ -11,19 +12,70 @@ from qdrant_client import models
 
 from mcp_server_qdrant.channel import ChannelOrchestrator
 from mcp_server_qdrant.common.filters import make_indexes
-from mcp_server_qdrant.common.func_tools import make_partial_function
+from mcp_server_qdrant.common.func_tools import (
+    make_partial_function,
+    make_routed_function,
+)
 from mcp_server_qdrant.common.wrap_filters import wrap_filters
 from mcp_server_qdrant.embeddings.base import EmbeddingProvider
 from mcp_server_qdrant.embeddings.factory import create_embedding_provider
+from mcp_server_qdrant.embeddings.reranker import VoyageReranker
 from mcp_server_qdrant.embeddings.types import EmbeddingProviderType
 from mcp_server_qdrant.qdrant import ArbitraryFilter, Entry, Metadata, QdrantConnector
 from mcp_server_qdrant.settings import (
     EmbeddingProviderSettings,
     QdrantSettings,
+    RerankSettings,
     ToolSettings,
 )
 
 logger = logging.getLogger(__name__)
+
+# Per-connection collection scoping (CCS-73).
+# A shared HTTP server reads each connection's active collections from this
+# header instead of relying solely on the process-level QDRANT_COLLECTIONS env
+# var. The grammar mirrors that env var: comma-separated `label:collection`
+# pairs (e.g. `research:KnowledgeMap,memory:mem-foo`). The header both ROUTES
+# each labeled tool to that connection's collection AND scopes enforcement to
+# the collections named. When the header is absent the server falls back to the
+# env-derived map/scope, preserving stdio backward compat.
+COLLECTION_SCOPE_HEADER = "x-qdrant-collections"
+
+
+class CollectionScopeError(ValueError):
+    """Raised when a request targets a collection outside its active scope."""
+
+
+def parse_collection_map(raw: str | None) -> dict[str, str] | None:
+    """Parse the per-connection collection header into a {label: collection} map.
+
+    Grammar mirrors the env ``QDRANT_COLLECTIONS`` var: comma-separated
+    ``label:collection`` pairs. A bare token without a colon is treated as
+    ``name:name`` so a flat collection-name list still yields a usable map
+    (label == collection). Returns None when no value is supplied (absent/blank
+    header), signalling that the env-derived map/scope should apply instead.
+    """
+    if not raw:
+        return None
+    mapping: dict[str, str] = {}
+    for part in raw.split(","):
+        token = part.strip()
+        if not token:
+            continue
+        if ":" in token:
+            label, _, collection = token.partition(":")
+            label, collection = label.strip(), collection.strip()
+            if label and collection:
+                mapping[label] = collection
+        else:
+            mapping[token] = token
+    return mapping or None
+
+
+def parse_collection_scope(raw: str | None) -> set[str] | None:
+    """The set of collections a header value permits (its map's values)."""
+    mapping = parse_collection_map(raw)
+    return set(mapping.values()) if mapping else None
 
 
 # FastMCP is an alternative interface for declaring the capabilities
@@ -39,6 +91,7 @@ class QdrantMCPServer(FastMCP):
         qdrant_settings: QdrantSettings,
         embedding_provider_settings: Optional[EmbeddingProviderSettings] = None,
         embedding_provider: Optional[EmbeddingProvider] = None,
+        rerank_settings: Optional[RerankSettings] = None,
         name: str = "mcp-server-qdrant",
         instructions: str | None = None,
         **settings: Any,
@@ -46,6 +99,7 @@ class QdrantMCPServer(FastMCP):
         self.tool_settings = tool_settings
         self.qdrant_settings = qdrant_settings
         self._qdrant_settings = qdrant_settings
+        self.rerank_settings = rerank_settings
 
         if embedding_provider_settings and embedding_provider:
             raise ValueError(
@@ -77,6 +131,14 @@ class QdrantMCPServer(FastMCP):
             == EmbeddingProviderType.CLOUD
         )
 
+        reranker = None
+        if rerank_settings and rerank_settings.enabled and rerank_settings.api_key:
+            reranker = VoyageReranker(
+                api_key=rerank_settings.api_key,
+                model=rerank_settings.model,
+                base_url=rerank_settings.base_url,
+            )
+
         self.qdrant_connector = QdrantConnector(
             qdrant_settings.location,
             qdrant_settings.api_key,
@@ -90,6 +152,10 @@ class QdrantMCPServer(FastMCP):
                 if is_cloud and self.embedding_provider_settings
                 else None
             ),
+            reranker=reranker,
+            rerank_candidate_limit=(
+                rerank_settings.candidate_limit if rerank_settings else 40
+            ),
         )
 
         super().__init__(name=name, instructions=instructions, **settings)
@@ -102,6 +168,67 @@ class QdrantMCPServer(FastMCP):
         """
         entry_metadata = json.dumps(entry.metadata) if entry.metadata else ""
         return f"<entry><content>{entry.content}</content><metadata>{entry_metadata}</metadata></entry>"
+
+    def _env_collection_map(self) -> dict[str, str] | None:
+        """The {label: collection} map derived from process-level env config.
+
+        Used as the fallback when no per-connection header is present (e.g.
+        stdio transport). Returns None when nothing is configured, meaning every
+        collection is permitted (legacy single/no-collection behavior unchanged).
+        """
+        if self.qdrant_settings.qdrant_collections:
+            return dict(self.qdrant_settings.qdrant_collections)
+        if self.qdrant_settings.collection_name:
+            name = self.qdrant_settings.collection_name
+            return {name: name}
+        return None
+
+    def _active_collection_map(self) -> dict[str, str] | None:
+        """Resolve the active {label: collection} map for the current request.
+
+        Reads the per-connection ``X-Qdrant-Collections`` header at request time.
+        When present it overrides the env-derived map FOR THAT REQUEST; when
+        absent the env-derived map applies (backward compat for stdio).
+        """
+        header_map = parse_collection_map(
+            get_http_headers().get(COLLECTION_SCOPE_HEADER)
+        )
+        if header_map is not None:
+            return header_map
+        return self._env_collection_map()
+
+    def _active_collection_scope(self) -> set[str] | None:
+        """The set of collections the current request may touch (None = unrestricted)."""
+        active_map = self._active_collection_map()
+        if active_map is None:
+            return None
+        return set(active_map.values())
+
+    def _resolve_collection_for_label(self, label: str) -> str | None:
+        """Resolve a labeled tool to its target collection for the current request.
+
+        Per-connection ROUTING: the header map wins, so ONE shared server can
+        serve many repos — each connection's ``memory`` tool resolves to that
+        connection's own collection. Falls back to the env-configured collection
+        for the label when the header omits it (stdio / single-process use).
+        """
+        active_map = self._active_collection_map()
+        if active_map and label in active_map:
+            return active_map[label]
+        if self.qdrant_settings.qdrant_collections:
+            return self.qdrant_settings.qdrant_collections.get(label)
+        return None
+
+    def _enforce_collection_scope(self, collection_name: str | None) -> None:
+        """Deny operations targeting a collection outside the active scope."""
+        scope = self._active_collection_scope()
+        if scope is None:
+            return
+        if collection_name is None or collection_name not in scope:
+            raise CollectionScopeError(
+                f"Access to collection {collection_name!r} is denied: it is not "
+                f"within the active collection scope {sorted(scope)!r}."
+            )
 
     def setup_tools(self):
         """
@@ -135,6 +262,8 @@ class QdrantMCPServer(FastMCP):
             """
             await ctx.debug(f"Storing information {information} in Qdrant")
 
+            self._enforce_collection_scope(collection_name)
+
             entry = Entry(content=information, metadata=metadata)
 
             await self.qdrant_connector.store(entry, collection_name=collection_name)
@@ -162,6 +291,8 @@ class QdrantMCPServer(FastMCP):
 
             # Log query_filter
             await ctx.debug(f"Query filter: {query_filter}")
+
+            self._enforce_collection_scope(collection_name)
 
             query_filter = models.Filter(**query_filter) if query_filter else None
 
@@ -201,6 +332,9 @@ class QdrantMCPServer(FastMCP):
             Update metadata on existing points without re-embedding.
             """
             await ctx.debug(f"Updating metadata on {len(point_ids)} points")
+
+            self._enforce_collection_scope(collection_name)
+
             payload_update = {f"metadata.{k}": v for k, v in metadata.items()}
             count = await self.qdrant_connector.update_payload(
                 point_ids, payload_update, collection_name=collection_name
@@ -260,9 +394,19 @@ class QdrantMCPServer(FastMCP):
     def _register_multi_collection_tools(
         self, find, store, update_metadata, filterable_conditions
     ):
-        """Register labeled find/store/update tools for each entry in qdrant_collections."""
-        for label, collection in self.qdrant_settings.qdrant_collections.items():
-            find_foo = make_partial_function(find, {"collection_name": collection})
+        """Register labeled find/store/update tools for each entry in qdrant_collections.
+
+        Each tool's target collection is bound to its LABEL and resolved per
+        request (``_resolve_collection_for_label``), so one shared HTTP server
+        routes a connection's ``memory`` tool to that connection's own
+        collection rather than a single process-global one.
+        """
+
+        def route(label):
+            return lambda label=label: self._resolve_collection_for_label(label)
+
+        for label in self.qdrant_settings.qdrant_collections:
+            find_foo = make_routed_function(find, "collection_name", route(label))
             if len(filterable_conditions) > 0:
                 find_foo = wrap_filters(find_foo, filterable_conditions)
             elif not self.qdrant_settings.allow_arbitrary_filter:
@@ -275,15 +419,15 @@ class QdrantMCPServer(FastMCP):
             )
 
             if not self.qdrant_settings.read_only:
-                store_foo = make_partial_function(store, {"collection_name": collection})
+                store_foo = make_routed_function(store, "collection_name", route(label))
                 self.tool(
                     store_foo,
                     name=f"qdrant-store-{label}",
                     description=self.tool_settings.get_store_description(label),
                 )
 
-                update_foo = make_partial_function(
-                    update_metadata, {"collection_name": collection}
+                update_foo = make_routed_function(
+                    update_metadata, "collection_name", route(label)
                 )
                 self.tool(
                     update_foo,
@@ -342,6 +486,8 @@ class QdrantMCPServer(FastMCP):
             cooldown_seconds=settings.channel_cooldown_seconds,
             max_per_session=settings.channel_max_per_session,
             project_filter=settings.channel_project_filter,
+            suppress_tags=settings.channel_suppress_tags,
+            episode_max_age_days=settings.channel_episode_max_age_days,
         )
 
         async def _watch_journal() -> None:

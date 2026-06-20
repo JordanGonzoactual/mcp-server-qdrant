@@ -3,7 +3,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import anyio
 import pytest
 
-from mcp_server_qdrant.mcp_server import QdrantMCPServer
+from mcp_server_qdrant.embeddings.base import EmbeddingProvider
+from mcp_server_qdrant.mcp_server import CollectionScopeError, QdrantMCPServer
 from mcp_server_qdrant.settings import QdrantSettings, ToolSettings
 
 ENV_VARS_TO_CLEAN = [
@@ -208,6 +209,200 @@ class TestChannelCapability:
         monkeypatch.setenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
         server = create_server()
         assert server._qdrant_settings.channel_enabled is False
+
+
+class _StubEmbeddingProvider(EmbeddingProvider):
+    """Deterministic local embedding provider so the in-memory connector can
+    round-trip without downloading a real model."""
+
+    def __init__(self, size: int = 8):
+        self._size = size
+
+    def _vector(self, text: str) -> list[float]:
+        vec = [0.0] * self._size
+        for i, ch in enumerate(text):
+            vec[i % self._size] += (ord(ch) % 17) / 17.0
+        return vec
+
+    async def embed_documents(self, documents: list[str]) -> list[list[float]]:
+        return [self._vector(doc) for doc in documents]
+
+    async def embed_query(self, query: str) -> list[float]:
+        return self._vector(query)
+
+    def get_vector_name(self) -> str:
+        return "dense"
+
+    def get_vector_size(self) -> int:
+        return self._size
+
+
+def _make_ctx() -> MagicMock:
+    ctx = MagicMock()
+    ctx.debug = AsyncMock()
+    return ctx
+
+
+class TestPerConnectionCollectionScope:
+    """CCS-73: a shared HTTP server scopes each connection to the collection
+    set carried in the X-Qdrant-Collections header, denying access to any
+    collection outside that set while keeping the env path functional."""
+
+    def _build_server(self, monkeypatch) -> QdrantMCPServer:
+        # Two labeled collections: scope A -> ColA, scope B -> ColB.
+        monkeypatch.setenv("QDRANT_COLLECTIONS", "a:ColA,b:ColB")
+        server = QdrantMCPServer(
+            tool_settings=ToolSettings(),
+            qdrant_settings=QdrantSettings(),
+            embedding_provider=_StubEmbeddingProvider(),
+        )
+        # Point the connector at a local in-memory Qdrant so permitted paths
+        # round-trip without any external endpoint.
+        from qdrant_client import AsyncQdrantClient
+
+        server.qdrant_connector._client = AsyncQdrantClient(location=":memory:")
+        return server
+
+    def _tool_fn(self, server: QdrantMCPServer, name: str):
+        return server._tool_manager._tools[name].fn
+
+    @pytest.mark.asyncio
+    async def test_cross_scope_read_denied_own_scope_permitted(
+        self, clean_env, monkeypatch
+    ):
+        server = self._build_server(monkeypatch)
+        find_b = self._tool_fn(server, "qdrant-find-b")  # bound to ColB
+
+        # Connection scoped to set A (ColA) must NOT reach ColB.
+        with patch(
+            "mcp_server_qdrant.mcp_server.get_http_headers",
+            return_value={"x-qdrant-collections": "ColA"},
+        ):
+            with pytest.raises(CollectionScopeError):
+                await find_b(ctx=_make_ctx(), query="anything")
+
+        # Same connection IS permitted to read its own collection (ColA).
+        find_a = self._tool_fn(server, "qdrant-find-a")
+        with patch(
+            "mcp_server_qdrant.mcp_server.get_http_headers",
+            return_value={"x-qdrant-collections": "ColA"},
+        ):
+            result = await find_a(ctx=_make_ctx(), query="anything")
+        # Empty in-memory collection -> None, but the scope gate let it through.
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_cross_scope_write_denied_own_scope_permitted(
+        self, clean_env, monkeypatch
+    ):
+        server = self._build_server(monkeypatch)
+        store_b = self._tool_fn(server, "qdrant-store-b")  # bound to ColB
+
+        # Connection scoped to set A cannot write into ColB.
+        with patch(
+            "mcp_server_qdrant.mcp_server.get_http_headers",
+            return_value={"x-qdrant-collections": "ColA"},
+        ):
+            with pytest.raises(CollectionScopeError):
+                await store_b(ctx=_make_ctx(), information="secret")
+
+        # Same connection CAN write + read back its own collection (ColA).
+        store_a = self._tool_fn(server, "qdrant-store-a")
+        find_a = self._tool_fn(server, "qdrant-find-a")
+        with patch(
+            "mcp_server_qdrant.mcp_server.get_http_headers",
+            return_value={"x-qdrant-collections": "ColA"},
+        ):
+            await store_a(ctx=_make_ctx(), information="hello world")
+            result = await find_a(ctx=_make_ctx(), query="hello world")
+        assert result is not None
+        assert any("hello world" in line for line in result)
+
+    @pytest.mark.asyncio
+    async def test_header_overrides_env_scope_for_that_request(
+        self, clean_env, monkeypatch
+    ):
+        """Header naming a collection NOT in the env set still scopes the
+        request to exactly that header set (per-connection override)."""
+        server = self._build_server(monkeypatch)
+        find_a = self._tool_fn(server, "qdrant-find-a")  # bound to ColA
+
+        # Header scopes to ColB only; ColA must be denied for this request.
+        with patch(
+            "mcp_server_qdrant.mcp_server.get_http_headers",
+            return_value={"x-qdrant-collections": "ColB"},
+        ):
+            with pytest.raises(CollectionScopeError):
+                await find_a(ctx=_make_ctx(), query="anything")
+
+    @pytest.mark.asyncio
+    async def test_absent_header_falls_back_to_env_scope(
+        self, clean_env, monkeypatch
+    ):
+        """Backward compat (stdio): no HTTP header -> env-derived scope applies,
+        and a collection in the env set is permitted."""
+        server = self._build_server(monkeypatch)
+        find_a = self._tool_fn(server, "qdrant-find-a")  # ColA is in env scope
+
+        with patch(
+            "mcp_server_qdrant.mcp_server.get_http_headers",
+            return_value={},
+        ):
+            # Does not raise: ColA is within the env-derived scope {ColA, ColB}.
+            result = await find_a(ctx=_make_ctx(), query="anything")
+        assert result is None
+
+
+class TestPerConnectionCollectionRouting:
+    """A shared HTTP server routes a labeled tool to a DIFFERENT collection per
+    connection, resolved at request time from the X-Qdrant-Collections header's
+    ``label:collection`` mapping — so one process serves many repos without one
+    process per repo."""
+
+    def _build_server(self, monkeypatch) -> QdrantMCPServer:
+        monkeypatch.setenv("QDRANT_COLLECTIONS", "a:ColA,b:ColB")
+        server = QdrantMCPServer(
+            tool_settings=ToolSettings(),
+            qdrant_settings=QdrantSettings(),
+            embedding_provider=_StubEmbeddingProvider(),
+        )
+        from qdrant_client import AsyncQdrantClient
+
+        server.qdrant_connector._client = AsyncQdrantClient(location=":memory:")
+        return server
+
+    def _tool_fn(self, server: QdrantMCPServer, name: str):
+        return server._tool_manager._tools[name].fn
+
+    @pytest.mark.asyncio
+    async def test_label_routes_to_header_named_collection(
+        self, clean_env, monkeypatch
+    ):
+        """Header ``a:ColX`` makes the ``a`` tool target ColX (not the env
+        default ColA); a connection routing ``a:ColA`` sees nothing, proving
+        the write landed in the per-connection collection."""
+        server = self._build_server(monkeypatch)
+        store_a = self._tool_fn(server, "qdrant-store-a")
+        find_a = self._tool_fn(server, "qdrant-find-a")
+
+        # Connection routes label 'a' -> ColX (a collection outside the env map).
+        with patch(
+            "mcp_server_qdrant.mcp_server.get_http_headers",
+            return_value={"x-qdrant-collections": "a:ColX"},
+        ):
+            await store_a(ctx=_make_ctx(), information="routed payload")
+            routed = await find_a(ctx=_make_ctx(), query="routed payload")
+        assert routed is not None
+        assert any("routed payload" in line for line in routed)
+
+        # A different connection routing 'a' -> the env default ColA sees
+        # nothing: the write went to ColX, so routing is per-connection.
+        with patch(
+            "mcp_server_qdrant.mcp_server.get_http_headers",
+            return_value={"x-qdrant-collections": "a:ColA"},
+        ):
+            default = await find_a(ctx=_make_ctx(), query="routed payload")
+        assert default is None
 
 
 class TestRunStdioAsyncChannelIntegration:
